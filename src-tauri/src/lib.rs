@@ -45,6 +45,14 @@ struct Project {
     is_git_repo: Option<bool>,
     product_name_template: Option<String>,
     add_timestamp: Option<bool>,
+    last_updated_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct AppConfig {
+    dist_output_path: String,
+    auto_refresh_enabled: bool,
+    auto_refresh_interval: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -311,6 +319,13 @@ fn copy_dist_and_zip(state: tauri::State<AppState>, id: String, path: String) ->
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     }).map_err(|e| e.to_string())?;
 
+    // 获取应用配置
+    let mut config_stmt = conn.prepare("SELECT dist_output_path FROM app_config WHERE id = 1")
+        .map_err(|e| e.to_string())?;
+
+    let dist_output_path: String = config_stmt.query_row([], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
     let template = product_name_template.unwrap_or(name.clone());
     let timestamp = if add_timestamp.unwrap_or(false) {
         format!("_{}", Utc::now().format("%Y%m%d_%H%M%S"))
@@ -326,8 +341,12 @@ fn copy_dist_and_zip(state: tauri::State<AppState>, id: String, path: String) ->
         return Err("dist 目录不存在".to_string());
     }
 
-    // 创建输出目录
-    let output_dir = std::path::Path::new(&path).join("output");
+    // 确定输出目录（优先使用配置中的路径，否则使用项目目录下的 output 文件夹）
+    let output_dir = if dist_output_path.is_empty() {
+        std::path::Path::new(&path).join("output")
+    } else {
+        std::path::Path::new(&dist_output_path).join(&folder_name)
+    };
     fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
 
     let target_folder = output_dir.join(&folder_name);
@@ -383,10 +402,42 @@ fn add_dir_to_zip(zip: &mut ZipWriter<fs::File>, base_path: &std::path::Path, cu
 }
 
 #[tauri::command]
+fn get_config(state: tauri::State<AppState>) -> Result<AppConfig, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare("SELECT dist_output_path, auto_refresh_enabled, auto_refresh_interval FROM app_config WHERE id = 1")
+        .map_err(|e| e.to_string())?;
+
+    let config = stmt.query_row([], |row| {
+        Ok(AppConfig {
+            dist_output_path: row.get(0)?,
+            auto_refresh_enabled: row.get::<_, i32>(1)? != 0,
+            auto_refresh_interval: row.get(2)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    Ok(config)
+}
+
+#[tauri::command]
+fn save_config(state: tauri::State<AppState>, dist_output_path: String, auto_refresh_enabled: bool, auto_refresh_interval: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let interval = auto_refresh_interval.parse::<i32>().unwrap_or(60);
+
+    conn.execute(
+        "UPDATE app_config SET dist_output_path = ?1, auto_refresh_enabled = ?2, auto_refresh_interval = ?3 WHERE id = 1",
+        (&dist_output_path, if auto_refresh_enabled { 1 } else { 0 }, &interval),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let projects = stmt.query_map([], |row| {
@@ -399,6 +450,7 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
+            last_updated_at: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -414,8 +466,8 @@ fn add_project(state: tauri::State<AppState>, id: String, name: String, path: St
     let is_git_repo = check_is_git_repo(path.clone());
 
     conn.execute(
-        "INSERT INTO projects (id, name, path, logo, added_at, is_git_repo) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (&id, &name, &path, &logo, &added_at, &is_git_repo),
+        "INSERT INTO projects (id, name, path, logo, added_at, is_git_repo, last_updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (&id, &name, &path, &logo, &added_at, &is_git_repo, &added_at),
     ).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -441,7 +493,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // 获取所有项目
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp FROM projects")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects")
         .map_err(|e| e.to_string())?;
 
     let projects: Vec<Project> = stmt.query_map([], |row| {
@@ -454,23 +506,26 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
+            last_updated_at: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
     .collect();
 
-    // 更新每个项目的 git 状态
+    let now = chrono::Utc::now().timestamp();
+
+    // 更新每个项目的 git 状态和更新时间
     for project in &projects {
         let is_git = check_is_git_repo(project.path.clone());
 
         conn.execute(
-            "UPDATE projects SET is_git_repo = ?1 WHERE id = ?2",
-            (&is_git, &project.id),
+            "UPDATE projects SET is_git_repo = ?1, last_updated_at = ?2 WHERE id = ?3",
+            (&is_git, &now, &project.id),
         ).map_err(|e| e.to_string())?;
     }
 
     // 重新查询获取更新后的数据
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let updated_projects: Vec<Project> = stmt.query_map([], |row| {
@@ -483,6 +538,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
+            last_updated_at: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -505,7 +561,8 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             added_at INTEGER NOT NULL,
             is_git_repo INTEGER,
             product_name_template TEXT,
-            add_timestamp INTEGER
+            add_timestamp INTEGER,
+            last_updated_at INTEGER
         )",
         [],
     )?;
@@ -528,6 +585,29 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         [],
     );
 
+    // 检查并添加 last_updated_at 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN last_updated_at INTEGER",
+        [],
+    );
+
+    // 创建配置表（如果已存在则忽略）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            dist_output_path TEXT DEFAULT '',
+            auto_refresh_enabled INTEGER DEFAULT 0,
+            auto_refresh_interval INTEGER DEFAULT 60
+        )",
+        [],
+    )?;
+
+    // 插入默认配置（如果不存在）
+    conn.execute(
+        "INSERT OR IGNORE INTO app_config (id, dist_output_path, auto_refresh_enabled, auto_refresh_interval) VALUES (1, '', 0, 60)",
+        [],
+    )?;
+
     Ok(conn)
 }
 
@@ -535,6 +615,7 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_dir).expect("Failed to create app data dir");
@@ -569,7 +650,9 @@ pub fn run() {
             kill_script,
             check_is_git_repo,
             update_project_config,
-            copy_dist_and_zip
+            copy_dist_and_zip,
+            get_config,
+            save_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

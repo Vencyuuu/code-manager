@@ -7,4 +7,5 @@ export interface Project {
   isGitRepo?: boolean
   productNameTemplate?: string
   addTimestamp?: boolean
+  lastUpdatedAt?: number
 }

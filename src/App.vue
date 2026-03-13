@@ -12,9 +12,8 @@ const navigate = (path: string) => {
 }
 
 onMounted(async () => {
-  // 全局加载项目数据
+  // 应用启动时加载项目数据并刷新
   await loadProjects()
-  // 应用启动时自动刷新
   await refreshAllProjects()
 })
 </script>

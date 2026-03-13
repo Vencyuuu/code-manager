@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { Project } from '../types/project'
+import { clearAllProjectLoadStatus } from './projectDataStore'
 
 // 后端返回的数据结构
 interface BackendProject {
@@ -12,6 +13,7 @@ interface BackendProject {
   is_git_repo?: boolean
   product_name_template?: string
   add_timestamp?: boolean
+  last_updated_at?: number
 }
 
 // 全局项目状态
@@ -32,7 +34,8 @@ export const loadProjects = async () => {
       addedAt: p.added_at,
       isGitRepo: p.is_git_repo,
       productNameTemplate: p.product_name_template,
-      addTimestamp: p.add_timestamp
+      addTimestamp: p.add_timestamp,
+      lastUpdatedAt: p.last_updated_at
     }))
   } catch (err) {
     console.error('Failed to load projects:', err)
@@ -49,6 +52,8 @@ export const addProject = async (project: Project) => {
       logo: project.logo
     })
     state.projects.push(project)
+    // 刷新所有项目以获取 git 和 npm 脚本信息
+    await refreshAllProjects()
   } catch (err) {
     console.error('Failed to add project:', err)
   }
@@ -77,8 +82,11 @@ export const refreshAllProjects = async () => {
       addedAt: p.added_at,
       isGitRepo: p.is_git_repo,
       productNameTemplate: p.product_name_template,
-      addTimestamp: p.add_timestamp
+      addTimestamp: p.add_timestamp,
+      lastUpdatedAt: p.last_updated_at
     }))
+    // 刷新后清除加载状态，以便项目卡片可以重新加载最新数据
+    clearAllProjectLoadStatus()
   } catch (err) {
     console.error('Failed to refresh all projects:', err)
   } finally {

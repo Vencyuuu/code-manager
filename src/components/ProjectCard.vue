@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Modal, Switch, message } from 'ant-design-vue'
 import { Icon } from '@iconify/vue'
 import type { Project } from '../types/project'
 import { useScriptStore } from '../stores/scriptStore'
+import { markProjectLoaded, isProjectLoaded } from '../stores/projectDataStore'
+import { cacheProjectData, getCachedProjectData } from '../stores/cachedProjectData'
 
 const props = defineProps<{
   project: Project
@@ -17,8 +19,7 @@ const emit = defineEmits<{
 
 const { addScriptState, updateScriptOutput, markScriptCompleted, getScriptState } = useScriptStore()
 
-const isExpanded = ref(false)
-const isGitRepo = ref(false)
+// 固定展开，无折叠功能
 const isBranchesCollapsed = ref(false)
 const branches = ref<{ name: string; current: boolean }[]>([])
 const currentBranch = ref('')
@@ -28,6 +29,7 @@ const scriptOutput = ref('')
 const isRunningScript = ref(false)
 const isSettingsVisible = ref(false)
 const isLoading = ref(false)
+const isDataLoaded = ref(false)
 
 // 输出 Modal
 const isOutputModalVisible = ref(false)
@@ -36,20 +38,80 @@ const isOutputModalVisible = ref(false)
 const productNameTemplate = ref('')
 const addTimestamp = ref(false)
 
+// 计算最后更新时间
+const lastUpdatedText = computed(() => {
+  if (!props.project.lastUpdatedAt) return ''
+  const date = new Date(props.project.lastUpdatedAt * 1000)
+  const now = new Date()
+  const diff = Math.floor((now.getTime() - date.getTime()) / 1000)
+
+  if (diff < 60) return '刚刚更新'
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前更新`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前更新`
+  return date.toLocaleString('zh-CN')
+})
+
+// Git 状态
+const isGitRepo = computed(() => props.project.isGitRepo === true)
+
 let unlistenOutput: UnlistenFn | null = null
 
-// 初始化 git 状态和产物命名配置
-const initGitStatus = () => {
-  // 从项目属性获取 git 状态
-  isGitRepo.value = props.project.isGitRepo === true
+// 加载项目数据
+const loadProjectData = async () => {
   // 初始化产物命名配置
   productNameTemplate.value = props.project.productNameTemplate || props.project.name
   addTimestamp.value = props.project.addTimestamp || false
+
+  // 先从缓存恢复数据（如果缓存中有）
+  const cached = getCachedProjectData(props.project.id)
+  if (cached && cached.loaded) {
+    branches.value = cached.branches
+    currentBranch.value = cached.currentBranch
+    npmScripts.value = cached.npmScripts
+  }
+
+  // 如果已经加载过，直接返回
+  if (isDataLoaded.value || isProjectLoaded(props.project.id)) {
+    return
+  }
+
+  isLoading.value = true
+  console.log('[ProjectCard] Loading project data for:', props.project.name, props.project.id)
+  try {
+    // 直接使用 props 中的 isGitRepo，如果不存在则检查
+    let isGit = props.project.isGitRepo
+    console.log('[ProjectCard] isGitRepo:', isGit, 'for:', props.project.name)
+    if (isGit === undefined) {
+      isGit = await invoke<boolean>('check_is_git_repo', { path: props.project.path })
+    }
+
+    // 并行加载 branches 和 npm scripts
+    await Promise.all([
+      loadBranches(isGit),
+      loadNpmScripts()
+    ])
+
+    // 保存到缓存
+    cacheProjectData(props.project.id, {
+      branches: branches.value,
+      currentBranch: currentBranch.value,
+      npmScripts: npmScripts.value,
+      loaded: true
+    })
+
+    isDataLoaded.value = true
+    markProjectLoaded(props.project.id) // 标记为已加载
+    console.log('[ProjectCard] Loaded successfully for:', props.project.name)
+  } catch (err) {
+    console.error('[ProjectCard] Failed to load project data:', err)
+  } finally {
+    isLoading.value = false
+  }
 }
 
 onMounted(async () => {
-  // 初始化 git 状态
-  initGitStatus()
+  // 加载项目数据
+  await loadProjectData()
 
   // 检查是否有正在运行的脚本状态
   const savedState = getScriptState(props.project.id)
@@ -77,13 +139,22 @@ onMounted(async () => {
       }
     }
   })
+
+  // 监听自动刷新事件
+  window.addEventListener('projects-auto-refresh', handleAutoRefresh)
 })
 
 onUnmounted(() => {
   if (unlistenOutput) {
     unlistenOutput()
   }
+  window.removeEventListener('projects-auto-refresh', handleAutoRefresh)
 })
+
+// 处理自动刷新
+const handleAutoRefresh = async () => {
+  await loadProjectData()
+}
 
 const openInVscode = async () => {
   try {
@@ -93,47 +164,29 @@ const openInVscode = async () => {
   }
 }
 
-const toggleExpand = async () => {
-  isExpanded.value = !isExpanded.value
-
-  if (isExpanded.value) {
-    // 先检查 git 状态（可能从数据库获取的是 null）
-    if (!isGitRepo.value) {
-      isGitRepo.value = await invoke<boolean>('check_is_git_repo', { path: props.project.path })
-    }
-    // 展开时加载数据
-    await loadBranches()
-    await loadNpmScripts()
-  }
-}
-
 const refreshProject = async () => {
-  isLoading.value = true
-  try {
-    // 检查并更新 git 状态
-    isGitRepo.value = await invoke<boolean>('check_is_git_repo', { path: props.project.path })
-    if (isGitRepo.value) {
-      await loadBranches()
-    }
-    await loadNpmScripts()
-  } catch (err) {
-    console.error('Failed to refresh project:', err)
-  } finally {
-    isLoading.value = false
-  }
+  await loadProjectData()
 }
 
 const toggleBranches = () => {
   isBranchesCollapsed.value = !isBranchesCollapsed.value
 }
 
-const loadBranches = async () => {
+const loadBranches = async (checkGit = true) => {
+  // 直接使用传入的 checkGit 参数，不再额外检查 computed 属性
+  if (!checkGit) {
+    branches.value = []
+    currentBranch.value = ''
+    return
+  }
   try {
+    console.log('[ProjectCard] Loading branches for:', props.project.path)
     branches.value = await invoke('get_git_branches', { path: props.project.path })
     const current = branches.value.find(b => b.current)
     currentBranch.value = current?.name || ''
+    console.log('[ProjectCard] Loaded branches:', branches.value.length, 'for:', props.project.name)
   } catch (err) {
-    console.error('Failed to load branches:', err)
+    console.error('[ProjectCard] Failed to load branches:', err)
     branches.value = []
     currentBranch.value = ''
   }
@@ -244,7 +297,7 @@ const copyDistAndZip = async () => {
 </script>
 
 <template>
-  <div class="project-card" :class="{ expanded: isExpanded }">
+  <div class="project-card expanded">
     <div class="card-main">
       <div class="card-left">
         <div class="logo">
@@ -252,13 +305,13 @@ const copyDistAndZip = async () => {
         </div>
       </div>
       <div class="card-right">
-        <h3 class="project-name">{{ project.name }}</h3>
+        <div class="project-name-row">
+          <h3 class="project-name">{{ project.name }}</h3>
+          <span v-if="lastUpdatedText" class="last-updated">{{ lastUpdatedText }}</span>
+        </div>
         <div class="actions">
           <button class="btn-open" @click="openInVscode">
             用 VSCode 打开
-          </button>
-          <button class="btn-expand" @click="toggleExpand">
-            {{ isExpanded ? '收起' : '更多' }}
           </button>
           <button class="btn-remove" @click="emit('remove', project.id)">
             移除
@@ -275,8 +328,14 @@ const copyDistAndZip = async () => {
       </div>
     </div>
 
-    <!-- 展开区域 -->
-    <div v-if="isExpanded" class="expanded-content">
+    <!-- Loading 状态 -->
+    <div v-if="isLoading" class="loading-overlay">
+      <Icon icon="mdi:loading" class="loading-spinner" />
+      <span>加载中...</span>
+    </div>
+
+    <!-- 详细信息区域（始终显示） -->
+    <div class="expanded-content">
       <!-- Git 分支 -->
       <div v-if="isGitRepo" class="section">
         <div class="section-header" @click="toggleBranches">
@@ -458,8 +517,22 @@ const copyDistAndZip = async () => {
   font-size: 16px;
   font-weight: 600;
   color: #333;
-  margin: 0 0 12px 0;
+  margin: 0;
   word-break: break-all;
+}
+
+.project-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.last-updated {
+  font-size: 11px;
+  color: #999;
+  font-weight: normal;
 }
 
 .actions {
@@ -547,6 +620,28 @@ const copyDistAndZip = async () => {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+.loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  z-index: 10;
+  border-radius: 8px;
+}
+
+.loading-spinner {
+  font-size: 32px;
+  color: #1890ff;
+  animation: spin 1s linear infinite;
 }
 
 .expanded-content {
