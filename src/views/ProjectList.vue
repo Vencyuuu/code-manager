@@ -1,28 +1,47 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { Input } from 'ant-design-vue'
+import { Input, Modal, message } from 'ant-design-vue'
 import { Icon } from '@iconify/vue'
 import { useProjectStore } from '../stores/projectStore'
+import { useGroupStore } from '../stores/groupStore'
 import ProjectCard from '../components/ProjectCard.vue'
 import type { Project } from '../types/project'
 
 const { state: projectState, addProject, removeProject, refreshAllProjects } = useProjectStore()
+const { state: groupState, loadGroups, createGroup, updateGroup, deleteGroup, selectGroup } = useGroupStore()
 
 const isDragging = ref(false)
 const searchQuery = ref('')
 const columnCount = ref(2)
 
+// 新建分组弹窗
+const isGroupModalVisible = ref(false)
+const isEditGroup = ref(false)
+const editingGroupId = ref('')
+const groupName = ref('')
+const groupColor = ref('#1890ff')
+const groupIcon = ref('')
+const selectedProjectIds = ref<string[]>([])
+
 let unlisten: UnlistenFn | null = null
 
 // 过滤后的项目列表
 const filteredProjects = computed(() => {
-  const projects = projectState.projects
-  if (!searchQuery.value.trim()) {
-    return projects
+  let projects = projectState.projects
+
+  // 按分组筛选
+  if (groupState.selectedGroupId) {
+    projects = projects.filter(p => p.groupId === groupState.selectedGroupId)
   }
-  const query = searchQuery.value.toLowerCase()
-  return projects.filter(p => p.name.toLowerCase().includes(query))
+
+  // 按搜索词筛选
+  if (searchQuery.value.trim()) {
+    const query = searchQuery.value.toLowerCase()
+    projects = projects.filter(p => p.name.toLowerCase().includes(query))
+  }
+
+  return projects
 })
 
 // 切换布局列数
@@ -45,7 +64,100 @@ const handleDrop = async (paths: string[]) => {
   }
 }
 
+// 切换项目选择
+const toggleProjectSelect = (projectId: string) => {
+  const idx = selectedProjectIds.value.indexOf(projectId)
+  if (idx > -1) {
+    selectedProjectIds.value.splice(idx, 1)
+  } else {
+    selectedProjectIds.value.push(projectId)
+  }
+}
+
+// 打开新建分组弹窗
+const openCreateGroupModal = () => {
+  isEditGroup.value = false
+  editingGroupId.value = ''
+  groupName.value = ''
+  groupColor.value = '#1890ff'
+  groupIcon.value = ''
+  selectedProjectIds.value = []
+  isGroupModalVisible.value = true
+}
+
+// 打开编辑分组弹窗
+const openEditGroupModal = (group: { id: string; name: string; color: string; icon?: string }) => {
+  isEditGroup.value = true
+  editingGroupId.value = group.id
+  groupName.value = group.name
+  groupColor.value = group.color
+  groupIcon.value = group.icon || ''
+  // 选中属于该分组的项目
+  selectedProjectIds.value = projectState.projects
+    .filter(p => p.groupId === group.id)
+    .map(p => p.id)
+  isGroupModalVisible.value = true
+}
+
+// 保存分组
+const saveGroup = async () => {
+  if (!groupName.value.trim()) {
+    message.warning('请输入分组名称')
+    return
+  }
+
+  try {
+    const groupData = {
+      id: editingGroupId.value || Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      name: groupName.value.trim(),
+      color: groupColor.value,
+      icon: groupIcon.value.trim() || undefined
+    }
+
+    if (isEditGroup.value) {
+      await updateGroup(groupData)
+      message.success('分组已更新')
+    } else {
+      await createGroup(groupData)
+      message.success('分组已创建')
+    }
+
+    // 绑定项目到分组
+    for (const projectId of selectedProjectIds.value) {
+      await useGroupStore().bindProjectToGroup(projectId, groupData.id)
+    }
+
+    // 刷新项目列表
+    await useProjectStore().loadProjects()
+    await useGroupStore().loadGroups()
+
+    isGroupModalVisible.value = false
+  } catch (err) {
+    message.error('保存失败: ' + err)
+  }
+}
+
+// 删除分组
+const handleDeleteGroup = async (groupId: string) => {
+  try {
+    await deleteGroup(groupId)
+    message.success('分组已删除')
+    // 刷新项目列表
+    await useProjectStore().loadProjects()
+  } catch (err) {
+    message.error('删除失败: ' + err)
+  }
+}
+
+// 选择分组筛选
+const handleSelectGroup = (groupId: string | null) => {
+  selectGroup(groupId)
+}
+
 onMounted(async () => {
+  // 加载分组列表
+  await loadGroups()
+
   // 监听 Tauri 的拖拽事件
   unlisten = await listen<{ paths: string[] }>('tauri://drag-drop', async (event) => {
     console.log('Drag drop event:', event.payload)
@@ -116,27 +228,119 @@ const handleRemoveProject = async (id: string) => {
       </div>
     </div>
 
+    <!-- 分组筛选栏 -->
+    <div class="group-filter-bar">
+      <div class="group-filter-left">
+        <button
+          class="group-filter-btn"
+          :class="{ active: groupState.selectedGroupId === null }"
+          @click="handleSelectGroup(null)"
+        >
+          <span class="group-name">全部</span>
+        </button>
+        <div
+          v-for="group in groupState.groups"
+          :key="group.id"
+          class="group-filter-item"
+          :style="{ '--group-color': group.color }"
+        >
+          <button
+            class="group-filter-btn"
+            :class="{ active: groupState.selectedGroupId === group.id }"
+            @click="handleSelectGroup(group.id)"
+          >
+            <span class="group-dot" :style="{ background: group.color }"></span>
+            <span class="group-name">{{ group.name }}</span>
+            <button class="group-settings-btn" @click.stop="openEditGroupModal(group)">
+              <Icon icon="mdi:cog" />
+            </button>
+          </button>
+        </div>
+      </div>
+      <div class="group-filter-right">
+        <button class="new-group-btn" @click="openCreateGroupModal">
+          <Icon icon="mdi:plus" />
+          新建分组
+        </button>
+      </div>
+    </div>
+
     <!-- 项目列表 -->
     <div
       class="project-list"
       :class="{ 'dragging': isDragging }"
       :style="{ gridTemplateColumns: `repeat(${columnCount}, 1fr)` }"
     >
-      <div v-if="filteredProjects.length === 0" class="empty-state">
+      <!-- 全局 Loading 遮罩 -->
+      <div v-if="projectState.isLoading" class="global-loading-overlay">
+        <Icon icon="mdi:loading" class="global-loading-spinner" />
+        <span>正在刷新所有项目...</span>
+      </div>
+      <div v-if="filteredProjects.length === 0 && !projectState.isLoading" class="empty-state">
         <div class="empty-icon">📁</div>
         <p v-if="searchQuery">没有找到匹配的项目</p>
+        <p v-else-if="groupState.selectedGroupId">该分组下没有项目</p>
         <p v-else>拖拽项目文件夹到这里添加</p>
       </div>
       <ProjectCard
         v-for="project in filteredProjects"
         :key="project.id"
         :project="project"
+        :group-color="groupState.groups.find(g => g.id === project.groupId)?.color"
         @remove="handleRemoveProject"
       />
     </div>
     <div v-if="isDragging" class="drop-overlay">
       <div class="drop-text">释放以添加项目</div>
     </div>
+
+    <!-- 新建/编辑分组弹窗 -->
+    <Modal
+      v-model:open="isGroupModalVisible"
+      :title="isEditGroup ? '编辑分组' : '新建分组'"
+      :footer="null"
+      :width="500"
+      @ok="saveGroup"
+    >
+      <div class="group-form">
+        <div class="form-item">
+          <label>分组名称</label>
+          <Input v-model:value="groupName" placeholder="请输入分组名称" />
+        </div>
+        <div class="form-item">
+          <label>主题颜色</label>
+          <div class="color-picker">
+            <input type="color" v-model="groupColor" />
+            <Input v-model:value="groupColor" placeholder="#1890ff" class="color-input" />
+          </div>
+        </div>
+        <div class="form-item">
+          <label>分组图标 (Iconify 图标名)</label>
+          <Input v-model:value="groupIcon" placeholder="如: mdi:folder" allow-clear />
+        </div>
+        <div class="form-item">
+          <label>选择项目</label>
+          <div class="project-select-list">
+            <div
+              v-for="project in projectState.projects"
+              :key="project.id"
+              class="project-select-item"
+              :class="{ selected: selectedProjectIds.includes(project.id) }"
+              @click="toggleProjectSelect(project.id)"
+            >
+              <Icon v-if="selectedProjectIds.includes(project.id)" icon="mdi:checkbox-marked" class="check-icon" />
+              <Icon v-else icon="mdi:checkbox-blank-outline" class="check-icon" />
+              <span>{{ project.name }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="cancel-btn" @click="isGroupModalVisible = false">取消</button>
+          <button class="save-btn" @click="saveGroup">保存</button>
+          <button v-if="isEditGroup" class="delete-btn" @click="handleDeleteGroup(editingGroupId)">删除</button>
+        </div>
+      </div>
+    </Modal>
   </div>
 </template>
 
@@ -150,9 +354,9 @@ const handleRemoveProject = async (id: string) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   padding: 12px 16px;
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
@@ -164,6 +368,12 @@ const handleRemoveProject = async (id: string) => {
 
 .search-input {
   width: 100%;
+}
+
+/* 暗色模式搜索输入框 */
+[data-theme="dark"] .search-input .ant-input {
+  background: var(--bg-card) !important;
+  color: var(--text-primary) !important;
 }
 
 .toolbar-right {
@@ -180,26 +390,26 @@ const handleRemoveProject = async (id: string) => {
 .layout-btn {
   width: 36px;
   height: 36px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: #fff;
+  background: var(--bg-card);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 18px;
-  color: #666;
+  color: var(--text-secondary);
   transition: all 0.2s;
 }
 
 .layout-btn:hover {
-  border-color: #1890ff;
-  color: #1890ff;
+  border-color: var(--primary-color);
+  color: var(--primary-color);
 }
 
 .layout-btn.active {
-  background: #1890ff;
-  border-color: #1890ff;
+  background: var(--primary-color);
+  border-color: var(--primary-color);
   color: #fff;
 }
 
@@ -208,7 +418,7 @@ const handleRemoveProject = async (id: string) => {
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
-  background: #1890ff;
+  background: var(--primary-color);
   color: #fff;
   border: none;
   border-radius: 4px;
@@ -218,7 +428,7 @@ const handleRemoveProject = async (id: string) => {
 }
 
 .refresh-all-btn:hover:not(:disabled) {
-  background: #40a9ff;
+  background: var(--primary-hover);
 }
 
 .refresh-all-btn:disabled {
@@ -235,13 +445,174 @@ const handleRemoveProject = async (id: string) => {
   to { transform: rotate(360deg); }
 }
 
+/* 分组筛选栏 */
+.group-filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 8px 16px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.group-filter-left {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.group-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  padding-right: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: var(--bg-card);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.group-filter-btn:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.group-filter-btn.active {
+  background: var(--group-color, var(--primary-color));
+  border-color: var(--group-color, var(--primary-color));
+  color: #fff;
+}
+
+/* 暗色模式下分组按钮选中样式 - 降低亮度 */
+[data-theme="dark"] .group-filter-btn.active {
+  background: var(--group-color, var(--primary-color));
+  filter: brightness(0.7);
+  border-color: var(--group-color, var(--primary-color));
+  color: #fff;
+}
+
+[data-theme="dark"] .group-filter-btn.active .group-settings-btn {
+  color: #fff;
+}
+
+[data-theme="dark"] .group-filter-btn.active .group-settings-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="dark"] .group-settings-btn {
+  color: var(--text-secondary);
+}
+
+[data-theme="dark"] .group-settings-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.group-name {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.group-settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #999;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-left: 4px;
+}
+
+.group-settings-btn:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.group-filter-btn.active .group-settings-btn {
+  color: #fff;
+}
+
+.group-filter-btn.active .group-settings-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.group-filter-item {
+  display: inline-flex;
+}
+
+.group-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.group-filter-right {
+  display: flex;
+  gap: 8px;
+}
+
+.new-group-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-card);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.new-group-btn:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+/* 项目列表 */
 .project-list {
   display: grid;
   gap: 20px;
+  position: relative;
+  min-height: 200px;
+}
+
+.global-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg-card);
+  opacity: 0.95;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  z-index: 20;
+  border-radius: 8px;
+}
+
+.global-loading-spinner {
+  font-size: 40px;
+  color: var(--primary-color);
+  animation: spin 1s linear infinite;
 }
 
 .project-list.dragging {
-  background: rgba(24, 144, 255, 0.1);
+  background: var(--primary-color);
+  opacity: 0.1;
 }
 
 .empty-state {
@@ -251,7 +622,7 @@ const handleRemoveProject = async (id: string) => {
   align-items: center;
   justify-content: center;
   height: 400px;
-  color: #999;
+  color: var(--text-secondary);
 }
 
 .empty-icon {
@@ -269,8 +640,9 @@ const handleRemoveProject = async (id: string) => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(24, 144, 255, 0.2);
-  border: 2px dashed #1890ff;
+  background: var(--primary-color);
+  opacity: 0.2;
+  border: 2px dashed var(--primary-color);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -280,7 +652,109 @@ const handleRemoveProject = async (id: string) => {
 
 .drop-text {
   font-size: 24px;
-  color: #1890ff;
+  color: var(--primary-color);
   font-weight: 500;
+}
+
+/* 分组表单 */
+.group-form {
+  padding: 8px 0;
+}
+
+.form-item {
+  margin-bottom: 16px;
+}
+
+.form-item label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.color-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.color-picker input[type="color"] {
+  width: 40px;
+  height: 32px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.color-input {
+  flex: 1;
+}
+
+.project-select-list {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-card);
+}
+
+.project-select-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+  color: var(--text-primary);
+}
+
+.project-select-item:hover {
+  background: var(--bg-color);
+}
+
+.project-select-item.selected {
+  background: rgba(24, 144, 255, 0.1);
+}
+
+.check-icon {
+  color: #1890ff;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+.cancel-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.save-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  background: var(--primary-color);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.delete-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  background: #ff4d4f;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
 }
 </style>

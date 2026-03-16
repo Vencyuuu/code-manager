@@ -2,15 +2,18 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { Modal, Switch, message } from 'ant-design-vue'
+import { Modal, Switch, message, Dropdown } from 'ant-design-vue'
 import { Icon } from '@iconify/vue'
 import type { Project } from '../types/project'
 import { useScriptStore } from '../stores/scriptStore'
-import { markProjectLoaded, isProjectLoaded } from '../stores/projectDataStore'
+import { markProjectLoaded, isProjectLoaded, clearProjectLoadStatus } from '../stores/projectDataStore'
+import { useProjectStore } from '../stores/projectStore'
+import { useGroupStore } from '../stores/groupStore'
 import { cacheProjectData, getCachedProjectData } from '../stores/cachedProjectData'
 
 const props = defineProps<{
   project: Project
+  groupColor?: string
 }>()
 
 const emit = defineEmits<{
@@ -18,6 +21,8 @@ const emit = defineEmits<{
 }>()
 
 const { addScriptState, updateScriptOutput, markScriptCompleted, getScriptState } = useScriptStore()
+const { state: projectState } = useProjectStore()
+const { state: groupState, bindProjectToGroup, loadGroups } = useGroupStore()
 
 // 固定展开，无折叠功能
 const isBranchesCollapsed = ref(false)
@@ -28,6 +33,8 @@ const customScript = ref('')
 const scriptOutput = ref('')
 const isRunningScript = ref(false)
 const isSettingsVisible = ref(false)
+const isZipping = ref(false)
+const selectedGroupId = ref<string | null>(null)
 const isLoading = ref(false)
 const isDataLoaded = ref(false)
 
@@ -37,6 +44,33 @@ const isOutputModalVisible = ref(false)
 // 产物命名配置
 const productNameTemplate = ref('')
 const addTimestamp = ref(false)
+const addBranch = ref(false)
+const addEnv = ref(false)
+const envName = ref('')
+const addVersion = ref(false)
+const versionName = ref('')
+
+// 原始配置备份（用于比较是否有变更）
+const originalConfig = ref({
+  productNameTemplate: '',
+  addTimestamp: false,
+  addBranch: false,
+  addEnv: false,
+  envName: '',
+  addVersion: false,
+  versionName: ''
+})
+
+// 判断配置是否有变更
+const hasProductConfigChanges = computed(() => {
+  return productNameTemplate.value !== originalConfig.value.productNameTemplate ||
+    addTimestamp.value !== originalConfig.value.addTimestamp ||
+    addBranch.value !== originalConfig.value.addBranch ||
+    addEnv.value !== originalConfig.value.addEnv ||
+    envName.value !== originalConfig.value.envName ||
+    addVersion.value !== originalConfig.value.addVersion ||
+    versionName.value !== originalConfig.value.versionName
+})
 
 // 计算最后更新时间
 const lastUpdatedText = computed(() => {
@@ -54,6 +88,17 @@ const lastUpdatedText = computed(() => {
 // Git 状态
 const isGitRepo = computed(() => props.project.isGitRepo === true)
 
+// 是否有分组背景
+const hasGroupBackground = computed(() => !!props.groupColor)
+
+// 分组背景样式
+const groupBackgroundStyle = computed(() => {
+  if (!props.groupColor) return {}
+  return {
+    '--group-color': props.groupColor
+  }
+})
+
 let unlistenOutput: UnlistenFn | null = null
 
 // 加载项目数据
@@ -61,6 +106,22 @@ const loadProjectData = async () => {
   // 初始化产物命名配置
   productNameTemplate.value = props.project.productNameTemplate || props.project.name
   addTimestamp.value = props.project.addTimestamp || false
+  addBranch.value = props.project.addBranch || false
+  addEnv.value = props.project.addEnv || false
+  envName.value = props.project.envName || ''
+  addVersion.value = props.project.addVersion || false
+  versionName.value = props.project.versionName || ''
+
+  // 保存原始配置
+  originalConfig.value = {
+    productNameTemplate: productNameTemplate.value,
+    addTimestamp: addTimestamp.value,
+    addBranch: addBranch.value,
+    addEnv: addEnv.value,
+    envName: envName.value,
+    addVersion: addVersion.value,
+    versionName: versionName.value
+  }
 
   // 先从缓存恢复数据（如果缓存中有）
   const cached = getCachedProjectData(props.project.id)
@@ -164,8 +225,43 @@ const openInVscode = async () => {
   }
 }
 
+const openInCursor = async () => {
+  try {
+    await invoke('open_in_cursor', { path: props.project.path })
+  } catch (err) {
+    console.error('Failed to open in Cursor:', err)
+  }
+}
+
+const openInWebstorm = async () => {
+  try {
+    await invoke('open_in_webstorm', { path: props.project.path })
+  } catch (err) {
+    console.error('Failed to open in WebStorm:', err)
+  }
+}
+
+const openInTrae = async () => {
+  try {
+    await invoke('open_in_trae', { path: props.project.path })
+  } catch (err) {
+    console.error('Failed to open in Trae:', err)
+  }
+}
+
 const refreshProject = async () => {
+  // 刷新前先清除加载状态，强制重新加载数据
+  isDataLoaded.value = false
+  clearProjectLoadStatus(props.project.id)
   await loadProjectData()
+  // 更新项目的最后更新时间
+  const now = Math.floor(Date.now() / 1000)
+  props.project.lastUpdatedAt = now
+  // 同时更新 store 中的数据
+  const project = projectState.projects.find(p => p.id === props.project.id)
+  if (project) {
+    project.lastUpdatedAt = now
+  }
 }
 
 const toggleBranches = () => {
@@ -199,7 +295,11 @@ const switchBranch = async (branch: string) => {
     await loadBranches()
   } catch (err) {
     console.error('Failed to switch branch:', err)
-    alert('切换分支失败: ' + err)
+    Modal.error({
+      title: '切换分支失败',
+      content: String(err),
+      okText: '确定'
+    })
   }
 }
 
@@ -224,7 +324,11 @@ const runNpmScript = async (scriptName: string) => {
   } catch (err) {
     isRunningScript.value = false
     scriptOutput.value = String(err)
-    alert('脚本执行失败: ' + err)
+    Modal.error({
+      title: '脚本执行失败',
+      content: String(err),
+      okText: '确定'
+    })
   }
 }
 
@@ -243,7 +347,11 @@ const runCustomScript = async () => {
   } catch (err) {
     isRunningScript.value = false
     scriptOutput.value = String(err)
-    alert('脚本执行失败: ' + err)
+    Modal.error({
+      title: '脚本执行失败',
+      content: String(err),
+      okText: '确定'
+    })
   }
 }
 
@@ -258,6 +366,7 @@ const killScript = async () => {
 }
 
 const openSettings = () => {
+  selectedGroupId.value = props.project.groupId || null
   isSettingsVisible.value = true
 }
 
@@ -272,8 +381,34 @@ const saveProductConfig = async () => {
     await invoke('update_project_config', {
       id: props.project.id,
       productNameTemplate: productNameTemplate.value || props.project.name,
-      addTimestamp: addTimestamp.value
+      addTimestamp: addTimestamp.value,
+      addBranch: addBranch.value,
+      addEnv: addEnv.value,
+      envName: envName.value,
+      addVersion: addVersion.value,
+      versionName: versionName.value
     })
+    // 更新 projectStore 中的项目数据
+    const project = projectState.projects.find(p => p.id === props.project.id)
+    if (project) {
+      project.productNameTemplate = productNameTemplate.value || props.project.name
+      project.addTimestamp = addTimestamp.value
+      project.addBranch = addBranch.value
+      project.addEnv = addEnv.value
+      project.envName = envName.value
+      project.addVersion = addVersion.value
+      project.versionName = versionName.value
+    }
+    // 更新原始配置
+    originalConfig.value = {
+      productNameTemplate: productNameTemplate.value,
+      addTimestamp: addTimestamp.value,
+      addBranch: addBranch.value,
+      addEnv: addEnv.value,
+      envName: envName.value,
+      addVersion: addVersion.value,
+      versionName: versionName.value
+    }
     message.success('配置已保存')
   } catch (err) {
     console.error('Failed to save config:', err)
@@ -281,8 +416,26 @@ const saveProductConfig = async () => {
   }
 }
 
+// 绑定项目到分组
+const handleBindGroup = async () => {
+  try {
+    await bindProjectToGroup(props.project.id, selectedGroupId.value)
+    // 更新本地项目数据
+    const project = projectState.projects.find(p => p.id === props.project.id)
+    if (project) {
+      project.groupId = selectedGroupId.value || undefined
+    }
+    message.success('分组已更新')
+    // 刷新分组列表
+    await loadGroups()
+  } catch (err) {
+    message.error('绑定失败: ' + err)
+  }
+}
+
 // 复制 dist 并打包 zip
 const copyDistAndZip = async () => {
+  isZipping.value = true
   try {
     const result = await invoke<string>('copy_dist_and_zip', {
       id: props.project.id,
@@ -292,12 +445,14 @@ const copyDistAndZip = async () => {
   } catch (err) {
     console.error('Failed to copy dist and zip:', err)
     message.error('操作失败: ' + err)
+  } finally {
+    isZipping.value = false
   }
 }
 </script>
 
 <template>
-  <div class="project-card expanded">
+  <div class="project-card expanded" :class="{ 'has-group-bg': hasGroupBackground }" :style="groupBackgroundStyle">
     <div class="card-main">
       <div class="card-left">
         <div class="logo">
@@ -310,12 +465,33 @@ const copyDistAndZip = async () => {
           <span v-if="lastUpdatedText" class="last-updated">{{ lastUpdatedText }}</span>
         </div>
         <div class="actions">
-          <button class="btn-open" @click="openInVscode">
-            用 VSCode 打开
-          </button>
-          <button class="btn-remove" @click="emit('remove', project.id)">
-            移除
-          </button>
+          <Dropdown :trigger="['click']">
+            <button class="btn-open">
+              <Icon icon="mdi:folder-eye" />
+              打开方式
+              <span class="dropdown-arrow">▼</span>
+            </button>
+            <template #overlay>
+              <div class="ide-dropdown">
+                <div class="ide-option" @click="openInVscode">
+                  <Icon icon="mdi:microsoft-visual-studio" class="ide-icon vscode" />
+                  <span>VSCode</span>
+                </div>
+                <div class="ide-option" @click="openInCursor">
+                  <Icon icon="mdi:cursor-default" class="ide-icon cursor" />
+                  <span>Cursor</span>
+                </div>
+                <div class="ide-option" @click="openInWebstorm">
+                  <Icon icon="mdi:jetbrains" class="ide-icon webstorm" />
+                  <span>WebStorm</span>
+                </div>
+                <div class="ide-option" @click="openInTrae">
+                  <Icon icon="mdi:robot" class="ide-icon trae" />
+                  <span>Trae</span>
+                </div>
+              </div>
+            </template>
+          </Dropdown>
         </div>
       </div>
       <div class="card-actions">
@@ -432,13 +608,47 @@ const copyDistAndZip = async () => {
             <span class="config-label">添加时间戳:</span>
             <Switch v-model:checked="addTimestamp" />
           </div>
+          <div class="config-row">
+            <span class="config-label">添加分支名:</span>
+            <Switch v-model:checked="addBranch" />
+            <input
+              v-if="addBranch"
+              v-model="currentBranch"
+              type="text"
+              placeholder="当前分支名"
+              class="config-input-small"
+              disabled
+            />
+          </div>
+          <div class="config-row">
+            <span class="config-label">添加环境名:</span>
+            <Switch v-model:checked="addEnv" />
+            <input
+              v-if="addEnv"
+              v-model="envName"
+              type="text"
+              placeholder="如: dev, test, prod"
+              class="config-input-small"
+            />
+          </div>
+          <div class="config-row">
+            <span class="config-label">添加版本号:</span>
+            <Switch v-model:checked="addVersion" />
+            <input
+              v-if="addVersion"
+              v-model="versionName"
+              type="text"
+              placeholder="如: v1.0.0"
+              class="config-input-small"
+            />
+          </div>
           <div class="config-actions">
-            <button class="save-btn" @click="saveProductConfig">
+            <button class="save-btn" @click="saveProductConfig" :disabled="!hasProductConfigChanges">
               保存配置
             </button>
-            <button class="zip-btn" @click="copyDistAndZip">
-              <Icon icon="mdi:folder-zip" />
-              复制 dist 并打包
+            <button class="zip-btn" @click="copyDistAndZip" :disabled="isZipping">
+              <Icon icon="mdi:folder-zip" :class="{ 'spin': isZipping }" />
+              {{ isZipping ? '打包中...' : '复制 dist 并打包' }}
             </button>
           </div>
         </div>
@@ -452,9 +662,30 @@ const copyDistAndZip = async () => {
       :footer="null"
       :width="400"
     >
-      <p>项目: {{ project.name }}</p>
-      <p>路径: {{ project.path }}</p>
-      <p style="color: #999; margin-top: 16px;">设置功能开发中...</p>
+      <div class="settings-modal-content">
+        <div class="settings-info">
+          <p><strong>项目:</strong> {{ project.name }}</p>
+          <p><strong>路径:</strong> {{ project.path }}</p>
+        </div>
+        <div class="settings-group-section">
+          <label>分组</label>
+          <div class="group-select-wrapper">
+            <select v-model="selectedGroupId" class="group-select">
+              <option :value="null">无</option>
+              <option v-for="group in groupState.groups" :key="group.id" :value="group.id">
+                {{ group.name }}
+              </option>
+            </select>
+            <button class="bind-group-btn" @click="handleBindGroup">绑定</button>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-remove-in-modal" @click="emit('remove', project.id); isSettingsVisible = false">
+            <Icon icon="mdi:delete" />
+            移除此项目
+          </button>
+        </div>
+      </div>
     </Modal>
 
     <!-- 输出 Modal -->
@@ -471,7 +702,7 @@ const copyDistAndZip = async () => {
 
 <style scoped>
 .project-card {
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 8px;
   padding: 16px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
@@ -487,6 +718,13 @@ const copyDistAndZip = async () => {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
+.project-card.has-group-bg {
+  background: linear-gradient(var(--bg-card), var(--bg-card)) padding-box,
+              linear-gradient(135deg, var(--group-color, var(--primary-color)), rgba(255, 255, 255, 0.5)) border-box !important;
+  border: 3px solid transparent;
+  border-radius: 8px;
+}
+
 .card-main {
   display: flex;
 }
@@ -498,7 +736,7 @@ const copyDistAndZip = async () => {
 .logo {
   width: 48px;
   height: 48px;
-  background: #f0f0f0;
+  background: var(--bg-color);
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -516,7 +754,7 @@ const copyDistAndZip = async () => {
 .project-name {
   font-size: 16px;
   font-weight: 600;
-  color: #333;
+  color: var(--text-primary);
   margin: 0;
   word-break: break-all;
 }
@@ -531,7 +769,7 @@ const copyDistAndZip = async () => {
 
 .last-updated {
   font-size: 11px;
-  color: #999;
+  color: var(--text-secondary);
   font-weight: normal;
 }
 
@@ -553,12 +791,12 @@ const copyDistAndZip = async () => {
 }
 
 .btn-open {
-  background: #1890ff;
+  background: var(--primary-color);
   color: #fff;
 }
 
 .btn-open:hover {
-  background: #40a9ff;
+  background: var(--primary-hover);
 }
 
 .btn-expand {
@@ -579,6 +817,53 @@ const copyDistAndZip = async () => {
   background: #ff7875;
 }
 
+.dropdown-arrow {
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.ide-dropdown {
+  background: var(--bg-card);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+  min-width: 140px;
+}
+
+.ide-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+  color: var(--text-primary);
+}
+
+.ide-option:hover {
+  background: var(--bg-color);
+}
+
+.ide-icon {
+  font-size: 18px;
+}
+
+.ide-icon.vscode {
+  color: #007acc;
+}
+
+.ide-icon.cursor {
+  color: #3b82f6;
+}
+
+.ide-icon.webstorm {
+  color: #087cfa;
+}
+
+.ide-icon.trae {
+  color: #ff6b35;
+}
+
 .card-actions {
   display: flex;
   flex-direction: column;
@@ -593,19 +878,19 @@ const copyDistAndZip = async () => {
   height: 32px;
   border: none;
   border-radius: 4px;
-  background: #f0f0f0;
+  background: var(--bg-color);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 18px;
-  color: #666;
+  color: var(--text-secondary);
   transition: all 0.2s;
 }
 
 .icon-btn:hover:not(:disabled) {
-  background: #e0e0e0;
-  color: #1890ff;
+  background: var(--border-color);
+  color: var(--primary-color);
 }
 
 .icon-btn:disabled {
@@ -628,7 +913,8 @@ const copyDistAndZip = async () => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--bg-card);
+  opacity: 0.95;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -640,14 +926,14 @@ const copyDistAndZip = async () => {
 
 .loading-spinner {
   font-size: 32px;
-  color: #1890ff;
+  color: var(--primary-color);
   animation: spin 1s linear infinite;
 }
 
 .expanded-content {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--border-color);
 }
 
 .section {
@@ -664,13 +950,13 @@ const copyDistAndZip = async () => {
 .section-header h4 {
   font-size: 14px;
   font-weight: 600;
-  color: #333;
+  color: var(--text-primary);
   margin: 0;
 }
 
 .current-branch {
   margin-left: 8px;
-  color: #1890ff;
+  color: var(--primary-color);
   font-weight: 500;
   font-size: 13px;
 }
@@ -678,12 +964,12 @@ const copyDistAndZip = async () => {
 .collapse-icon {
   margin-left: auto;
   font-size: 10px;
-  color: #999;
+  color: var(--text-secondary);
 }
 
 .not-git,
 .no-scripts {
-  color: #999;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -697,9 +983,9 @@ const copyDistAndZip = async () => {
 .branch-btn,
 .script-btn {
   padding: 4px 10px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: #fff;
+  background: var(--bg-card);
   font-size: 12px;
   cursor: pointer;
   transition: all 0.2s;
@@ -707,14 +993,14 @@ const copyDistAndZip = async () => {
 
 .branch-btn:hover,
 .script-btn:hover:not(:disabled) {
-  border-color: #1890ff;
-  color: #1890ff;
+  border-color: var(--primary-color);
+  color: var(--primary-color);
 }
 
 .branch-btn.current {
-  background: #1890ff;
+  background: var(--primary-color);
   color: #fff;
-  border-color: #1890ff;
+  border-color: var(--primary-color);
 }
 
 .script-btn:disabled {
@@ -730,9 +1016,11 @@ const copyDistAndZip = async () => {
 .custom-script input {
   flex: 1;
   padding: 8px 12px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   font-size: 13px;
+  background: var(--bg-card);
+  color: var(--text-primary);
 }
 
 .custom-script input:focus {
@@ -742,7 +1030,7 @@ const copyDistAndZip = async () => {
 
 .run-btn {
   padding: 8px 16px;
-  background: #1890ff;
+  background: var(--primary-color);
   color: #fff;
   border: none;
   border-radius: 4px;
@@ -751,7 +1039,7 @@ const copyDistAndZip = async () => {
 }
 
 .run-btn:hover:not(:disabled) {
-  background: #40a9ff;
+  background: var(--primary-hover);
 }
 
 .run-btn:disabled {
@@ -769,7 +1057,7 @@ const copyDistAndZip = async () => {
 .output-header h4 {
   font-size: 14px;
   font-weight: 600;
-  color: #333;
+  color: var(--text-primary);
   margin: 0;
 }
 
@@ -783,7 +1071,7 @@ const copyDistAndZip = async () => {
   align-items: center;
   gap: 4px;
   padding: 4px 12px;
-  background: #1890ff;
+  background: var(--primary-color);
   color: #fff;
   border: none;
   border-radius: 4px;
@@ -792,7 +1080,7 @@ const copyDistAndZip = async () => {
 }
 
 .output-btn:hover {
-  background: #40a9ff;
+  background: var(--primary-hover);
 }
 
 .kill-btn {
@@ -813,7 +1101,7 @@ const copyDistAndZip = async () => {
 }
 
 .output {
-  background: #f5f5f5;
+  background: var(--bg-color);
   padding: 12px;
   border-radius: 4px;
   font-size: 12px;
@@ -837,21 +1125,44 @@ const copyDistAndZip = async () => {
 
 .config-label {
   font-size: 13px;
-  color: #666;
+  color: var(--text-secondary);
   min-width: 80px;
 }
 
 .config-input {
   flex: 1;
   padding: 6px 10px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   font-size: 13px;
+  background: var(--bg-card);
+  color: var(--text-primary);
 }
 
 .config-input:focus {
   outline: none;
   border-color: #1890ff;
+}
+
+.config-input-small {
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 12px;
+  width: 120px;
+  margin-left: 8px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.config-input-small:focus {
+  outline: none;
+  border-color: #1890ff;
+}
+
+.config-input-small:disabled {
+  background: var(--bg-color);
+  color: var(--text-secondary);
 }
 
 .config-actions {
@@ -870,8 +1181,13 @@ const copyDistAndZip = async () => {
   cursor: pointer;
 }
 
-.save-btn:hover {
+.save-btn:hover:not(:disabled) {
   background: #73d13d;
+}
+
+.save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .zip-btn {
@@ -889,6 +1205,83 @@ const copyDistAndZip = async () => {
 
 .zip-btn:hover {
   background: #9254de;
+}
+
+.settings-modal-content {
+  padding: 8px 0;
+}
+
+.settings-info {
+  margin-bottom: 20px;
+}
+
+.settings-info p {
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.settings-group-section {
+  margin-bottom: 16px;
+}
+
+.settings-group-section label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.group-select-wrapper {
+  display: flex;
+  gap: 8px;
+}
+
+.group-select {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 14px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.bind-group-btn {
+  padding: 8px 16px;
+  background: var(--primary-color);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.bind-group-btn:hover {
+  background: var(--primary-hover);
+}
+
+.settings-actions {
+  border-top: 1px solid var(--border-color);
+  padding-top: 16px;
+}
+
+.btn-remove-in-modal {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: #ff4d4f;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-remove-in-modal:hover {
+  background: #ff7875;
 }
 
 .modal-output {

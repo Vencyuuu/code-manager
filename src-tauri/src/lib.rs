@@ -45,6 +45,12 @@ struct Project {
     is_git_repo: Option<bool>,
     product_name_template: Option<String>,
     add_timestamp: Option<bool>,
+    add_branch: Option<bool>,
+    add_env: Option<bool>,
+    env_name: Option<String>,
+    add_version: Option<bool>,
+    version_name: Option<String>,
+    group_id: Option<String>,
     last_updated_at: Option<i64>,
 }
 
@@ -59,6 +65,15 @@ struct AppConfig {
 struct GitBranch {
     name: String,
     current: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Group {
+    id: String,
+    name: String,
+    color: String,
+    icon: Option<String>,
+    created_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -81,11 +96,53 @@ struct ScriptOutput {
 
 #[tauri::command]
 fn open_in_vscode(path: String) -> Result<(), String> {
-    let _ = Command::new("cmd")
-        .args(["/C", "start", "", "code", &path])
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'code' -ArgumentList '{}'", path)])
         .spawn();
 
     Ok(())
+}
+
+#[tauri::command]
+fn open_in_cursor(path: String) -> Result<(), String> {
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'cursor' -ArgumentList '{}'", path)])
+        .spawn();
+
+    Ok(())
+}
+
+#[tauri::command]
+fn open_in_webstorm(path: String) -> Result<(), String> {
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'webstorm' -ArgumentList '{}'", path)])
+        .spawn();
+
+    Ok(())
+}
+
+#[tauri::command]
+fn open_in_trae(path: String) -> Result<(), String> {
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'trae' -ArgumentList '{}'", path)])
+        .spawn();
+
+    Ok(())
+}
+
+// 内部函数：获取当前分支名
+fn get_current_branch(path: &str) -> Result<String, String> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("cd '{}'; git branch --show-current", path)])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(branch)
 }
 
 #[tauri::command]
@@ -296,12 +353,12 @@ fn check_is_git_repo(path: String) -> bool {
 }
 
 #[tauri::command]
-fn update_project_config(state: tauri::State<AppState>, id: String, product_name_template: Option<String>, add_timestamp: Option<bool>) -> Result<(), String> {
+fn update_project_config(state: tauri::State<AppState>, id: String, product_name_template: Option<String>, add_timestamp: Option<bool>, add_branch: Option<bool>, add_env: Option<bool>, env_name: Option<String>, add_version: Option<bool>, version_name: Option<String>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     conn.execute(
-        "UPDATE projects SET product_name_template = ?1, add_timestamp = ?2 WHERE id = ?3",
-        (&product_name_template, &add_timestamp, &id),
+        "UPDATE projects SET product_name_template = ?1, add_timestamp = ?2, add_branch = ?3, add_env = ?4, env_name = ?5, add_version = ?6, version_name = ?7 WHERE id = ?8",
+        (&product_name_template, &add_timestamp, &add_branch, &add_env, &env_name, &add_version, &version_name, &id),
     ).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -312,11 +369,11 @@ fn copy_dist_and_zip(state: tauri::State<AppState>, id: String, path: String) ->
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // 获取项目配置
-    let mut stmt = conn.prepare("SELECT name, product_name_template, add_timestamp FROM projects WHERE id = ?1")
+    let mut stmt = conn.prepare("SELECT name, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name FROM projects WHERE id = ?1")
         .map_err(|e| e.to_string())?;
 
-    let (name, product_name_template, add_timestamp): (String, Option<String>, Option<bool>) = stmt.query_row([&id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    let (name, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name): (String, Option<String>, Option<bool>, Option<bool>, Option<bool>, Option<String>, Option<bool>, Option<String>) = stmt.query_row([&id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
     }).map_err(|e| e.to_string())?;
 
     // 获取应用配置
@@ -327,13 +384,42 @@ fn copy_dist_and_zip(state: tauri::State<AppState>, id: String, path: String) ->
         .map_err(|e| e.to_string())?;
 
     let template = product_name_template.unwrap_or(name.clone());
-    let timestamp = if add_timestamp.unwrap_or(false) {
-        format!("_{}", Utc::now().format("%Y%m%d_%H%M%S"))
-    } else {
-        String::new()
-    };
 
-    let folder_name = format!("{}{}", template, timestamp);
+    // 构建文件名：template + branch + env + version + timestamp
+    let mut parts: Vec<String> = vec![template];
+
+    // 添加分支名
+    if add_branch.unwrap_or(false) {
+        // 获取当前分支名
+        if let Ok(branch) = get_current_branch(&path) {
+            parts.push(branch);
+        }
+    }
+
+    // 添加环境名
+    if add_env.unwrap_or(false) {
+        if let Some(env) = env_name {
+            if !env.is_empty() {
+                parts.push(env);
+            }
+        }
+    }
+
+    // 添加版本号
+    if add_version.unwrap_or(false) {
+        if let Some(version) = version_name {
+            if !version.is_empty() {
+                parts.push(version);
+            }
+        }
+    }
+
+    // 添加时间戳
+    if add_timestamp.unwrap_or(false) {
+        parts.push(Utc::now().format("%Y%m%d_%H%M%S").to_string());
+    }
+
+    let folder_name = parts.join("_");
 
     // 检查 dist 目录是否存在
     let dist_path = std::path::Path::new(&path).join("dist");
@@ -437,7 +523,7 @@ fn save_config(state: tauri::State<AppState>, dist_output_path: String, auto_ref
 fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let projects = stmt.query_map([], |row| {
@@ -450,7 +536,13 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
-            last_updated_at: row.get(8)?,
+            add_branch: row.get(8)?,
+            add_env: row.get(9)?,
+            env_name: row.get(10)?,
+            add_version: row.get(11)?,
+            version_name: row.get(12)?,
+            group_id: row.get(13)?,
+            last_updated_at: row.get(14)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -493,7 +585,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // 获取所有项目
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects")
         .map_err(|e| e.to_string())?;
 
     let projects: Vec<Project> = stmt.query_map([], |row| {
@@ -506,7 +598,13 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
-            last_updated_at: row.get(8)?,
+            add_branch: row.get(8)?,
+            add_env: row.get(9)?,
+            env_name: row.get(10)?,
+            add_version: row.get(11)?,
+            version_name: row.get(12)?,
+            group_id: row.get(13)?,
+            last_updated_at: row.get(14)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -525,7 +623,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
     }
 
     // 重新查询获取更新后的数据
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, last_updated_at FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let updated_projects: Vec<Project> = stmt.query_map([], |row| {
@@ -538,13 +636,102 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             is_git_repo: row.get(5)?,
             product_name_template: row.get(6)?,
             add_timestamp: row.get(7)?,
-            last_updated_at: row.get(8)?,
+            add_branch: row.get(8)?,
+            add_env: row.get(9)?,
+            env_name: row.get(10)?,
+            add_version: row.get(11)?,
+            version_name: row.get(12)?,
+            group_id: row.get(13)?,
+            last_updated_at: row.get(14)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
     .collect();
 
     Ok(updated_projects)
+}
+
+// 获取所有分组
+#[tauri::command]
+fn get_groups(state: tauri::State<AppState>) -> Result<Vec<Group>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare("SELECT id, name, color, icon, created_at FROM groups ORDER BY created_at DESC")
+        .map_err(|e| e.to_string())?;
+
+    let groups = stmt.query_map([], |row| {
+        Ok(Group {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            color: row.get(2)?,
+            icon: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    Ok(groups)
+}
+
+// 创建分组
+#[tauri::command]
+fn create_group(state: tauri::State<AppState>, id: String, name: String, color: String, icon: Option<String>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let created_at = chrono::Utc::now().timestamp();
+
+    conn.execute(
+        "INSERT INTO groups (id, name, color, icon, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        (&id, &name, &color, &icon, &created_at),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// 更新分组
+#[tauri::command]
+fn update_group(state: tauri::State<AppState>, id: String, name: String, color: String, icon: Option<String>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "UPDATE groups SET name = ?1, color = ?2, icon = ?3 WHERE id = ?4",
+        (&name, &color, &icon, &id),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// 删除分组
+#[tauri::command]
+fn delete_group(state: tauri::State<AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // 先解除该项目与分组的关联
+    conn.execute(
+        "UPDATE projects SET group_id = NULL WHERE group_id = ?1",
+        [&id],
+    ).map_err(|e| e.to_string())?;
+
+    // 删除分组
+    conn.execute(
+        "DELETE FROM groups WHERE id = ?1",
+        [&id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// 绑定项目到分组
+#[tauri::command]
+fn bind_project_to_group(state: tauri::State<AppState>, project_id: String, group_id: Option<String>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "UPDATE projects SET group_id = ?1 WHERE id = ?2",
+        (&group_id, &project_id),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
@@ -585,6 +772,48 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         [],
     );
 
+    // 检查并添加 add_branch 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN add_branch INTEGER",
+        [],
+    );
+
+    // 检查并添加 env_name 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN env_name TEXT",
+        [],
+    );
+
+    // 检查并添加 add_env 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN add_env INTEGER",
+        [],
+    );
+
+    // 检查并添加 env_name 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN env_name TEXT",
+        [],
+    );
+
+    // 检查并添加 add_version 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN add_version INTEGER",
+        [],
+    );
+
+    // 检查并添加 version_name 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN version_name TEXT",
+        [],
+    );
+
+    // 检查并添加 group_id 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN group_id TEXT",
+        [],
+    );
+
     // 检查并添加 last_updated_at 列（如果不存在）
     let _ = conn.execute(
         "ALTER TABLE projects ADD COLUMN last_updated_at INTEGER",
@@ -605,6 +834,18 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
     // 插入默认配置（如果不存在）
     conn.execute(
         "INSERT OR IGNORE INTO app_config (id, dist_output_path, auto_refresh_enabled, auto_refresh_interval) VALUES (1, '', 0, 60)",
+        [],
+    )?;
+
+    // 创建分组表（如果已存在则忽略）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL,
+            icon TEXT,
+            created_at INTEGER NOT NULL
+        )",
         [],
     )?;
 
@@ -638,6 +879,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_in_vscode,
+            open_in_cursor,
+            open_in_webstorm,
+            open_in_trae,
             get_projects,
             add_project,
             remove_project,
@@ -652,7 +896,12 @@ pub fn run() {
             update_project_config,
             copy_dist_and_zip,
             get_config,
-            save_config
+            save_config,
+            get_groups,
+            create_group,
+            update_group,
+            delete_group,
+            bind_project_to_group
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

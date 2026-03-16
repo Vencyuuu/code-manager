@@ -1,0 +1,16 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景圆角矩形 -->
+  <rect width="1024" height="1024" rx="200" fill="url(#gradient)"/>
+
+  <!-- 代码标签符号 -->
+  <path d="M350 320L200 512L350 704" stroke="white" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M674 320L824 512L674 704" stroke="white" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M512 380L620 512L512 644" stroke="white" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1890FF"/>
+      <stop offset="1" stop-color="#722ED1"/>
+    </linearGradient>
+  </defs>
+</svg>

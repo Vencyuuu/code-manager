@@ -13,6 +13,12 @@ interface BackendProject {
   is_git_repo?: boolean
   product_name_template?: string
   add_timestamp?: boolean
+  add_branch?: boolean
+  add_env?: boolean
+  env_name?: string
+  add_version?: boolean
+  version_name?: string
+  group_id?: string
   last_updated_at?: number
 }
 
@@ -35,6 +41,12 @@ export const loadProjects = async () => {
       isGitRepo: p.is_git_repo,
       productNameTemplate: p.product_name_template,
       addTimestamp: p.add_timestamp,
+      addBranch: p.add_branch,
+      addEnv: p.add_env,
+      envName: p.env_name,
+      addVersion: p.add_version,
+      versionName: p.version_name,
+      groupId: p.group_id,
       lastUpdatedAt: p.last_updated_at
     }))
   } catch (err) {
@@ -83,6 +95,12 @@ export const refreshAllProjects = async () => {
       isGitRepo: p.is_git_repo,
       productNameTemplate: p.product_name_template,
       addTimestamp: p.add_timestamp,
+      addBranch: p.add_branch,
+      addEnv: p.add_env,
+      envName: p.env_name,
+      addVersion: p.add_version,
+      versionName: p.version_name,
+      groupId: p.group_id,
       lastUpdatedAt: p.last_updated_at
     }))
     // 刷新后清除加载状态，以便项目卡片可以重新加载最新数据
