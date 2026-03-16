@@ -144,6 +144,8 @@ const handleDeleteGroup = async (groupId: string) => {
     message.success('分组已删除')
     // 刷新项目列表
     await useProjectStore().loadProjects()
+    // 关闭弹窗
+    isGroupModalVisible.value = false
   } catch (err) {
     message.error('删除失败: ' + err)
   }
@@ -249,7 +251,10 @@ const handleRemoveProject = async (id: string) => {
             :class="{ active: groupState.selectedGroupId === group.id }"
             @click="handleSelectGroup(group.id)"
           >
-            <span class="group-dot" :style="{ background: group.color }"></span>
+            <span v-if="group.icon" class="group-icon" :style="{ color: group.color }">
+              <Icon :icon="group.icon" />
+            </span>
+            <span v-else class="group-dot" :style="{ background: group.color }"></span>
             <span class="group-name">{{ group.name }}</span>
             <button class="group-settings-btn" @click.stop="openEditGroupModal(group)">
               <Icon icon="mdi:cog" />
@@ -553,6 +558,15 @@ const handleRemoveProject = async (id: string) => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.group-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
 }
 
 .group-filter-right {

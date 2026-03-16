@@ -3,11 +3,14 @@ import { onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useProjectStore } from './stores/projectStore'
 import { useTheme } from './stores/themeStore'
+import { Icon } from '@iconify/vue'
 
 const router = useRouter()
 const route = useRoute()
 const { loadProjects, refreshAllProjects } = useProjectStore()
 const { loadThemeConfig } = useTheme()
+
+const APP_VERSION = 'v1.0.0'
 
 const navigate = (path: string) => {
   router.push(path)
@@ -26,7 +29,11 @@ onMounted(async () => {
   <div class="app-container" :class="{ 'dark-mode': false }">
     <aside class="sidebar">
       <div class="logo">
-        <h2>代码管理器</h2>
+        <Icon icon="mdi:code-tags" class="logo-icon" />
+        <div class="logo-text">
+          <h2>代码管理器</h2>
+          <span class="version">{{ APP_VERSION }}</span>
+        </div>
       </div>
       <nav class="nav-menu">
         <a
@@ -370,15 +377,35 @@ html[data-theme="dark"] .ant-modal-body .ant-btn-primary:hover {
 .logo {
   padding: 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 [data-theme="dark"] .logo {
   border-bottom-color: rgba(255, 255, 255, 0.1);
 }
 
+.logo-icon {
+  font-size: 28px;
+  color: #fff;
+}
+
+.logo-text {
+  display: flex;
+  flex-direction: column;
+}
+
 .logo h2 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
+  line-height: 1.2;
+}
+
+.logo .version {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 2px;
 }
 
 .nav-menu {
