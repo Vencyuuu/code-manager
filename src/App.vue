@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { useProjectStore } from './stores/projectStore'
@@ -14,6 +14,57 @@ const { loadThemeConfig } = useTheme()
 const { ideConfigs } = useIdeConfigStore()
 
 const APP_VERSION = 'v1.0.1'
+
+// 首次进入引导
+const showGuide = ref(false)
+const guideStep = ref(0)
+
+const guideSteps = [
+  {
+    title: '欢迎使用代码管理器',
+    content: '一款专为开发者设计的项目管理工具，帮助您高效管理多个项目。',
+    icon: 'mdi:code-tags'
+  },
+  {
+    title: '添加项目',
+    content: '拖拽文件夹到页面中，或点击"添加项目"按钮来添加您的第一个项目。',
+    icon: 'mdi:folder-plus'
+  },
+  {
+    title: '多 IDE 支持',
+    content: '支持 VSCode、Cursor、WebStorm、微信开发者工具等多种 IDE 快速打开项目。',
+    icon: 'mdi:application-cog'
+  },
+  {
+    title: '项目分组',
+    content: '创建分组来组织您的项目，支持拖拽项目到分组中进行管理。',
+    icon: 'mdi:folder-multiple'
+  },
+  {
+    title: '开始使用',
+    content: '现在您可以开始使用代码管理器了！如有需要，可以在设置中自定义主题和其他选项。',
+    icon: 'mdi:rocket-launch'
+  }
+]
+
+const closeGuide = () => {
+  showGuide.value = false
+  localStorage.setItem('hasSeenGuide', 'true')
+}
+
+const nextStep = () => {
+  if (guideStep.value < guideSteps.length - 1) {
+    guideStep.value++
+  } else {
+    closeGuide()
+  }
+}
+
+const prevStep = () => {
+  if (guideStep.value > 0) {
+    guideStep.value--
+  }
+}
 
 const navigate = (path: string) => {
   router.push(path)
@@ -30,6 +81,12 @@ const loadIdeConfigs = async () => {
 }
 
 onMounted(async () => {
+  // 检查是否首次进入
+  const hasSeenGuide = localStorage.getItem('hasSeenGuide')
+  if (!hasSeenGuide) {
+    showGuide.value = true
+  }
+
   // 加载主题配置
   loadThemeConfig()
   // 加载 IDE 配置
@@ -78,6 +135,43 @@ onMounted(async () => {
         <router-view />
       </div>
     </main>
+
+    <!-- 首次进入引导弹窗 -->
+    <a-modal
+      v-model:open="showGuide"
+      :footer="null"
+      :closable="false"
+      :maskClosable="false"
+      centered
+      width="480px"
+      class="guide-modal"
+    >
+      <div class="guide-content">
+        <div class="guide-icon">
+          <Icon :icon="guideSteps[guideStep].icon" />
+        </div>
+        <h3 class="guide-title">{{ guideSteps[guideStep].title }}</h3>
+        <p class="guide-text">{{ guideSteps[guideStep].content }}</p>
+
+        <div class="guide-steps">
+          <span
+            v-for="(step, index) in guideSteps"
+            :key="index"
+            class="step-dot"
+            :class="{ active: index === guideStep }"
+          />
+        </div>
+
+        <div class="guide-actions">
+          <a-button v-if="guideStep > 0" @click="prevStep">
+            上一步
+          </a-button>
+          <a-button type="primary" @click="nextStep">
+            {{ guideStep === guideSteps.length - 1 ? '开始使用' : '下一步' }}
+          </a-button>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -380,6 +474,7 @@ html[data-theme="dark"] .ant-modal-body .ant-btn-primary:hover {
 
 .sidebar {
   width: 220px;
+  flex-shrink: 0;
   background: linear-gradient(180deg, var(--primary-color) 0%, #ffffff 100%);
   color: #fff;
   display: flex;
@@ -471,5 +566,72 @@ html[data-theme="dark"] .ant-modal-body .ant-btn-primary:hover {
   flex: 1;
   padding: 30px;
   overflow-y: auto;
+}
+
+/* 首次引导弹窗样式 */
+.guide-content {
+  text-align: center;
+  padding: 20px 0;
+}
+
+.guide-icon {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+  border-radius: 50%;
+}
+
+.guide-icon .iconify {
+  font-size: 40px;
+  color: #fff;
+}
+
+.guide-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+.guide-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+.guide-steps {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-color);
+  transition: all 0.3s;
+}
+
+.step-dot.active {
+  width: 24px;
+  border-radius: 4px;
+  background: var(--primary-color);
+}
+
+.guide-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+html[data-theme="dark"] .guide-modal .ant-modal-content {
+  background: var(--bg-card);
 }
 </style>
