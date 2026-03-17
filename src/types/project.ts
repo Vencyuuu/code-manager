@@ -14,4 +14,5 @@ export interface Project {
   versionName?: string
   groupId?: string
   lastUpdatedAt?: number
+  remark?: string
 }

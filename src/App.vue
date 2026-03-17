@@ -1,27 +1,41 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
 import { useProjectStore } from './stores/projectStore'
 import { useTheme } from './stores/themeStore'
+import { useIdeConfigStore, type IdeConfig } from './stores/ideConfigStore'
 import { Icon } from '@iconify/vue'
 
 const router = useRouter()
 const route = useRoute()
-const { loadProjects, refreshAllProjects } = useProjectStore()
+const { loadProjects } = useProjectStore()
 const { loadThemeConfig } = useTheme()
+const { ideConfigs } = useIdeConfigStore()
 
-const APP_VERSION = 'v1.0.0'
+const APP_VERSION = 'v1.0.1'
 
 const navigate = (path: string) => {
   router.push(path)
 }
 
+// 加载 IDE 配置
+const loadIdeConfigs = async () => {
+  try {
+    const configs = await invoke<IdeConfig[]>('get_ide_configs')
+    ideConfigs.value = configs
+  } catch (err) {
+    console.error('Failed to load IDE configs:', err)
+  }
+}
+
 onMounted(async () => {
   // 加载主题配置
   loadThemeConfig()
-  // 应用启动时加载项目数据并刷新
+  // 加载 IDE 配置
+  await loadIdeConfigs()
+  // 仅加载项目列表，不刷新（项目卡片会在挂载时自行加载数据）
   await loadProjects()
-  await refreshAllProjects()
 })
 </script>
 
@@ -42,6 +56,7 @@ onMounted(async () => {
           :class="{ active: route.path === '/' }"
           @click.prevent="navigate('/')"
         >
+          <Icon icon="mdi:folder-multiple" class="nav-icon" />
           项目列表
         </a>
         <a
@@ -50,6 +65,7 @@ onMounted(async () => {
           :class="{ active: route.path === '/settings' }"
           @click.prevent="navigate('/settings')"
         >
+          <Icon icon="mdi:cog" class="nav-icon" />
           设置
         </a>
       </nav>
@@ -364,7 +380,7 @@ html[data-theme="dark"] .ant-modal-body .ant-btn-primary:hover {
 
 .sidebar {
   width: 220px;
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--sidebar-bg) 100%);
+  background: linear-gradient(180deg, var(--primary-color) 0%, #ffffff 100%);
   color: #fff;
   display: flex;
   flex-direction: column;
@@ -413,11 +429,17 @@ html[data-theme="dark"] .ant-modal-body .ant-btn-primary:hover {
 }
 
 .nav-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 12px 20px;
   color: rgba(255, 255, 255, 0.8);
   text-decoration: none;
   transition: all 0.2s;
+}
+
+.nav-icon {
+  font-size: 20px;
 }
 
 .nav-item:hover,

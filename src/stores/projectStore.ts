@@ -1,7 +1,6 @@
 import { reactive } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { Project } from '../types/project'
-import { clearAllProjectLoadStatus } from './projectDataStore'
 
 // 后端返回的数据结构
 interface BackendProject {
@@ -20,6 +19,7 @@ interface BackendProject {
   version_name?: string
   group_id?: string
   last_updated_at?: number
+  remark?: string
 }
 
 // 全局项目状态
@@ -47,7 +47,8 @@ export const loadProjects = async () => {
       addVersion: p.add_version,
       versionName: p.version_name,
       groupId: p.group_id,
-      lastUpdatedAt: p.last_updated_at
+      lastUpdatedAt: p.last_updated_at,
+      remark: p.remark
     }))
   } catch (err) {
     console.error('Failed to load projects:', err)
@@ -61,7 +62,8 @@ export const addProject = async (project: Project) => {
       id: project.id,
       name: project.name,
       path: project.path,
-      logo: project.logo
+      logo: project.logo,
+      groupId: project.groupId || null
     })
     state.projects.push(project)
     // 刷新所有项目以获取 git 和 npm 脚本信息
@@ -81,7 +83,7 @@ export const removeProject = async (id: string) => {
   }
 }
 
-// 刷新所有项目
+// 刷新所有项目（仅刷新元数据，不触发卡片重新加载）
 export const refreshAllProjects = async () => {
   state.isLoading = true
   try {
@@ -101,10 +103,11 @@ export const refreshAllProjects = async () => {
       addVersion: p.add_version,
       versionName: p.version_name,
       groupId: p.group_id,
-      lastUpdatedAt: p.last_updated_at
+      lastUpdatedAt: p.last_updated_at,
+      remark: p.remark
     }))
-    // 刷新后清除加载状态，以便项目卡片可以重新加载最新数据
-    clearAllProjectLoadStatus()
+    // 不再清除加载状态，让项目卡片自行管理其加载状态
+    // 如果需要强制刷新特定项目卡片，可以使用项目级别的刷新函数
   } catch (err) {
     console.error('Failed to refresh all projects:', err)
   } finally {

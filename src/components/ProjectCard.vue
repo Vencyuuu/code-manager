@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Modal, Switch, message, Dropdown } from 'ant-design-vue'
@@ -10,6 +10,8 @@ import { markProjectLoaded, isProjectLoaded, clearProjectLoadStatus } from '../s
 import { useProjectStore } from '../stores/projectStore'
 import { useGroupStore } from '../stores/groupStore'
 import { cacheProjectData, getCachedProjectData } from '../stores/cachedProjectData'
+import { useErrorLogStore } from '../stores/errorLogStore'
+import { useIdeConfigStore } from '../stores/ideConfigStore'
 
 const props = defineProps<{
   project: Project
@@ -21,8 +23,10 @@ const emit = defineEmits<{
 }>()
 
 const { addScriptState, updateScriptOutput, markScriptCompleted, getScriptState } = useScriptStore()
+const { addErrorLog } = useErrorLogStore()
 const { state: projectState } = useProjectStore()
 const { state: groupState, bindProjectToGroup, loadGroups } = useGroupStore()
+const { ideConfigs } = useIdeConfigStore()
 
 // 固定展开，无折叠功能
 const isBranchesCollapsed = ref(false)
@@ -49,6 +53,7 @@ const addEnv = ref(false)
 const envName = ref('')
 const addVersion = ref(false)
 const versionName = ref('')
+const remark = ref('')
 
 // 原始配置备份（用于比较是否有变更）
 const originalConfig = ref({
@@ -61,15 +66,18 @@ const originalConfig = ref({
   versionName: ''
 })
 
-// 判断配置是否有变更
-const hasProductConfigChanges = computed(() => {
-  return productNameTemplate.value !== originalConfig.value.productNameTemplate ||
-    addTimestamp.value !== originalConfig.value.addTimestamp ||
-    addBranch.value !== originalConfig.value.addBranch ||
-    addEnv.value !== originalConfig.value.addEnv ||
-    envName.value !== originalConfig.value.envName ||
-    addVersion.value !== originalConfig.value.addVersion ||
-    versionName.value !== originalConfig.value.versionName
+// 可用的 IDE 列表（仅显示已配置的）
+const availableIdes = computed(() => {
+  return [
+    { id: 'vscode', name: 'VSCode', icon: 'mdi:microsoft-visual-studio' },
+    { id: 'cursor', name: 'Cursor', icon: 'mdi:cursor-default' },
+    { id: 'webstorm', name: 'WebStorm', icon: 'mdi:jetbrains' },
+    { id: 'trae', name: 'Trae', icon: 'mdi:robot' },
+    { id: 'wechat', name: '微信开发者工具', icon: 'mdi:wechat' }
+  ].filter(ide => {
+    const config = ideConfigs.value.find(c => c.id === ide.id && c.enabled && c.path)
+    return !!config
+  })
 })
 
 // 计算最后更新时间
@@ -111,6 +119,7 @@ const loadProjectData = async () => {
   envName.value = props.project.envName || ''
   addVersion.value = props.project.addVersion || false
   versionName.value = props.project.versionName || ''
+  remark.value = props.project.remark || ''
 
   // 保存原始配置
   originalConfig.value = {
@@ -205,6 +214,52 @@ onMounted(async () => {
   window.addEventListener('projects-auto-refresh', handleAutoRefresh)
 })
 
+// 监听配置变化，自动保存
+watch([productNameTemplate, addTimestamp, addBranch, addEnv, envName, addVersion, versionName], async () => {
+  try {
+    await invoke('update_project_config', {
+      id: props.project.id,
+      productNameTemplate: productNameTemplate.value || props.project.name,
+      addTimestamp: addTimestamp.value,
+      addBranch: addBranch.value,
+      addEnv: addEnv.value,
+      envName: envName.value,
+      addVersion: addVersion.value,
+      versionName: versionName.value
+    })
+    // 同时更新 store 中的项目数据
+    const project = projectState.projects.find(p => p.id === props.project.id)
+    if (project) {
+      project.productNameTemplate = productNameTemplate.value || props.project.name
+      project.addTimestamp = addTimestamp.value
+      project.addBranch = addBranch.value
+      project.addEnv = addEnv.value
+      project.envName = envName.value
+      project.addVersion = addVersion.value
+      project.versionName = versionName.value
+    }
+  } catch (err) {
+    console.error('自动保存配置失败:', err)
+  }
+}, { deep: true })
+
+// 监听备注变化，自动保存
+watch(remark, async (newRemark) => {
+  try {
+    await invoke('update_project_remark', {
+      id: props.project.id,
+      remark: newRemark || null
+    })
+    // 同时更新 store 中的项目数据
+    const project = projectState.projects.find(p => p.id === props.project.id)
+    if (project) {
+      project.remark = newRemark
+    }
+  } catch (err) {
+    console.error('自动保存备注失败:', err)
+  }
+})
+
 onUnmounted(() => {
   if (unlistenOutput) {
     unlistenOutput()
@@ -217,35 +272,33 @@ const handleAutoRefresh = async () => {
   await loadProjectData()
 }
 
-const openInVscode = async () => {
-  try {
-    await invoke('open_in_vscode', { path: props.project.path })
-  } catch (err) {
-    console.error('Failed to open in VSCode:', err)
+const openInIde = async (ideId: string) => {
+  const config = ideConfigs.value.find(c => c.id === ideId && c.enabled && c.path)
+  if (!config || !config.path) {
+    message.warning('请先在设置中配置 IDE 路径')
+    return
   }
-}
 
-const openInCursor = async () => {
   try {
-    await invoke('open_in_cursor', { path: props.project.path })
+    if (ideId === 'vscode') {
+      await invoke('open_in_vscode', { path: props.project.path, idePath: config.path })
+    } else if (ideId === 'cursor') {
+      await invoke('open_in_cursor', { path: props.project.path, idePath: config.path })
+    } else if (ideId === 'webstorm') {
+      await invoke('open_in_webstorm', { path: props.project.path, idePath: config.path })
+    } else if (ideId === 'trae') {
+      await invoke('open_in_trae', { path: props.project.path, idePath: config.path })
+    } else if (ideId === 'wechat') {
+      await invoke('open_in_wechat', { path: props.project.path, idePath: config.path })
+    }
   } catch (err) {
-    console.error('Failed to open in Cursor:', err)
-  }
-}
-
-const openInWebstorm = async () => {
-  try {
-    await invoke('open_in_webstorm', { path: props.project.path })
-  } catch (err) {
-    console.error('Failed to open in WebStorm:', err)
-  }
-}
-
-const openInTrae = async () => {
-  try {
-    await invoke('open_in_trae', { path: props.project.path })
-  } catch (err) {
-    console.error('Failed to open in Trae:', err)
+    console.error(`Failed to open in ${ideId}:`, err)
+    addErrorLog(String(err), `${config.name}打开`)
+    Modal.error({
+      title: '打开失败',
+      content: `无法打开 ${config.name}，请检查路径是否正确: ${err}`,
+      okText: '确定'
+    })
   }
 }
 
@@ -324,6 +377,7 @@ const runNpmScript = async (scriptName: string) => {
   } catch (err) {
     isRunningScript.value = false
     scriptOutput.value = String(err)
+    addErrorLog(`NPM脚本[${scriptName}]: ${String(err)}`, props.project.name)
     Modal.error({
       title: '脚本执行失败',
       content: String(err),
@@ -347,6 +401,7 @@ const runCustomScript = async () => {
   } catch (err) {
     isRunningScript.value = false
     scriptOutput.value = String(err)
+    addErrorLog(`自定义脚本: ${String(err)}`, props.project.name)
     Modal.error({
       title: '脚本执行失败',
       content: String(err),
@@ -373,47 +428,6 @@ const openSettings = () => {
 // 打开输出 Modal
 const openOutputModal = () => {
   isOutputModalVisible.value = true
-}
-
-// 保存产物命名配置
-const saveProductConfig = async () => {
-  try {
-    await invoke('update_project_config', {
-      id: props.project.id,
-      productNameTemplate: productNameTemplate.value || props.project.name,
-      addTimestamp: addTimestamp.value,
-      addBranch: addBranch.value,
-      addEnv: addEnv.value,
-      envName: envName.value,
-      addVersion: addVersion.value,
-      versionName: versionName.value
-    })
-    // 更新 projectStore 中的项目数据
-    const project = projectState.projects.find(p => p.id === props.project.id)
-    if (project) {
-      project.productNameTemplate = productNameTemplate.value || props.project.name
-      project.addTimestamp = addTimestamp.value
-      project.addBranch = addBranch.value
-      project.addEnv = addEnv.value
-      project.envName = envName.value
-      project.addVersion = addVersion.value
-      project.versionName = versionName.value
-    }
-    // 更新原始配置
-    originalConfig.value = {
-      productNameTemplate: productNameTemplate.value,
-      addTimestamp: addTimestamp.value,
-      addBranch: addBranch.value,
-      addEnv: addEnv.value,
-      envName: envName.value,
-      addVersion: addVersion.value,
-      versionName: versionName.value
-    }
-    message.success('配置已保存')
-  } catch (err) {
-    console.error('Failed to save config:', err)
-    message.error('保存失败: ' + err)
-  }
 }
 
 // 绑定项目到分组
@@ -472,23 +486,16 @@ const copyDistAndZip = async () => {
               <span class="dropdown-arrow">▼</span>
             </button>
             <template #overlay>
-              <div class="ide-dropdown">
-                <div class="ide-option" @click="openInVscode">
-                  <Icon icon="mdi:microsoft-visual-studio" class="ide-icon vscode" />
-                  <span>VSCode</span>
-                </div>
-                <div class="ide-option" @click="openInCursor">
-                  <Icon icon="mdi:cursor-default" class="ide-icon cursor" />
-                  <span>Cursor</span>
-                </div>
-                <div class="ide-option" @click="openInWebstorm">
-                  <Icon icon="mdi:jetbrains" class="ide-icon webstorm" />
-                  <span>WebStorm</span>
-                </div>
-                <div class="ide-option" @click="openInTrae">
-                  <Icon icon="mdi:robot" class="ide-icon trae" />
-                  <span>Trae</span>
-                </div>
+              <div class="ide-dropdown" v-if="availableIdes.length > 0">
+                <template v-for="ide in availableIdes" :key="ide.id">
+                  <div class="ide-option" @click="openInIde(ide.id)">
+                    <Icon :icon="ide.icon" class="ide-icon" :class="ide.id" />
+                    <span>{{ ide.name }}</span>
+                  </div>
+                </template>
+              </div>
+              <div v-else class="ide-dropdown-empty">
+                <span>请先在设置中配置 IDE 路径</span>
               </div>
             </template>
           </Dropdown>
@@ -643,9 +650,6 @@ const copyDistAndZip = async () => {
             />
           </div>
           <div class="config-actions">
-            <button class="save-btn" @click="saveProductConfig" :disabled="!hasProductConfigChanges">
-              保存配置
-            </button>
             <button class="zip-btn" @click="copyDistAndZip" :disabled="isZipping">
               <Icon icon="mdi:folder-zip" :class="{ 'spin': isZipping }" />
               {{ isZipping ? '打包中...' : '复制 dist 并打包' }}
@@ -678,6 +682,15 @@ const copyDistAndZip = async () => {
             </select>
             <button class="bind-group-btn" @click="handleBindGroup">绑定</button>
           </div>
+        </div>
+        <div class="settings-remark-section">
+          <label>备注</label>
+          <textarea
+            v-model="remark"
+            placeholder="添加项目备注..."
+            class="remark-input"
+            rows="3"
+          ></textarea>
         </div>
         <div class="settings-actions">
           <button class="btn-remove-in-modal" @click="emit('remove', project.id); isSettingsVisible = false">
@@ -830,6 +843,13 @@ const copyDistAndZip = async () => {
   min-width: 140px;
 }
 
+.ide-dropdown-empty {
+  padding: 12px 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
 .ide-option {
   display: flex;
   align-items: center;
@@ -862,6 +882,10 @@ const copyDistAndZip = async () => {
 
 .ide-icon.trae {
   color: #ff6b35;
+}
+
+.ide-icon.wechat {
+  color: #07c160;
 }
 
 .card-actions {
@@ -1171,25 +1195,6 @@ const copyDistAndZip = async () => {
   margin-top: 4px;
 }
 
-.save-btn {
-  padding: 6px 16px;
-  background: #52c41a;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.save-btn:hover:not(:disabled) {
-  background: #73d13d;
-}
-
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .zip-btn {
   display: flex;
   align-items: center;
@@ -1259,6 +1264,39 @@ const copyDistAndZip = async () => {
 
 .bind-group-btn:hover {
   background: var(--primary-hover);
+}
+
+.settings-remark-section {
+  margin-bottom: 16px;
+}
+
+.settings-remark-section label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.remark-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 14px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  resize: vertical;
+  font-family: inherit;
+}
+
+.remark-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.remark-input::placeholder {
+  color: var(--text-secondary);
 }
 
 .settings-actions {

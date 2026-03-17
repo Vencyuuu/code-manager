@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { Input, Modal, message } from 'ant-design-vue'
+import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
+import { Input, Modal, Switch, message } from 'ant-design-vue'
 import { Icon } from '@iconify/vue'
 import { useProjectStore } from '../stores/projectStore'
 import { useGroupStore } from '../stores/groupStore'
@@ -15,6 +17,15 @@ const isDragging = ref(false)
 const searchQuery = ref('')
 const columnCount = ref(2)
 
+// 批量导入弹窗
+const isBatchImportVisible = ref(false)
+const batchImportFolder = ref('')
+const autoCreateGroup = ref(false)
+const bindToCreatedGroup = ref(true)
+const groupNameFromFolder = ref('')
+const isScanning = ref(false)
+const foundProjects = ref<string[]>([])
+
 // 新建分组弹窗
 const isGroupModalVisible = ref(false)
 const isEditGroup = ref(false)
@@ -23,6 +34,7 @@ const groupName = ref('')
 const groupColor = ref('#1890ff')
 const groupIcon = ref('')
 const selectedProjectIds = ref<string[]>([])
+
 
 let unlisten: UnlistenFn | null = null
 
@@ -51,16 +63,23 @@ const setColumnCount = (count: number) => {
 
 const handleDrop = async (paths: string[]) => {
   console.log('Drop paths:', paths)
+  // 检查当前是否选中了分组
+  const currentGroupId = groupState.selectedGroupId
   for (const path of paths) {
     const name = path.split(/[/\\]/).pop() || 'Unknown'
     const project: Project = {
       id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
       name,
       path,
-      addedAt: Date.now()
+      addedAt: Date.now(),
+      groupId: currentGroupId || undefined
     }
     console.log('Adding project:', project)
     await addProject(project)
+  }
+  // 如果有选中分组，刷新分组列表
+  if (currentGroupId) {
+    await useGroupStore().loadGroups()
   }
 }
 
@@ -182,6 +201,86 @@ onUnmounted(() => {
   }
 })
 
+// 批量导入
+const openBatchImportModal = async () => {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: '选择要导入的文件夹'
+  })
+  if (selected) {
+    batchImportFolder.value = selected as string
+    // 从文件夹名提取默认分组名
+    const folderName = batchImportFolder.value.split(/[/\\]/).pop() || ''
+    groupNameFromFolder.value = folderName
+    // 扫描文件夹下的子项目
+    isScanning.value = true
+    foundProjects.value = []
+    try {
+      const projects = await invoke<string[]>('scan_subfolders', { path: batchImportFolder.value })
+      foundProjects.value = projects
+    } catch (err) {
+      console.error('扫描失败:', err)
+      message.error('扫描文件夹失败: ' + err)
+    } finally {
+      isScanning.value = false
+    }
+    isBatchImportVisible.value = true
+  }
+}
+
+// 执行批量导入
+const executeBatchImport = async () => {
+  if (foundProjects.value.length === 0) {
+    message.warning('没有找到可导入的项目')
+    return
+  }
+
+  let groupId = ''
+
+  // 如果启用自动创建分组
+  if (autoCreateGroup.value && groupNameFromFolder.value.trim()) {
+    try {
+      const newGroupId = Date.now().toString() + Math.random().toString(36).substr(2, 9)
+      await useGroupStore().createGroup({
+        id: newGroupId,
+        name: groupNameFromFolder.value.trim(),
+        color: '#1890ff'
+      })
+      // 只有当"绑定到该分组"开关开启时才设置groupId
+      if (bindToCreatedGroup.value) {
+        groupId = newGroupId
+      }
+      message.success('分组已创建')
+    } catch (err) {
+      console.error('创建分组失败:', err)
+    }
+  }
+
+  let importedCount = 0
+  for (const projectPath of foundProjects.value) {
+    const name = projectPath.split(/[/\\]/).pop() || 'Unknown'
+    const project: Project = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+      name,
+      path: projectPath,
+      addedAt: Date.now(),
+      groupId: groupId || undefined
+    }
+    await addProject(project)
+    importedCount++
+  }
+
+  message.success(`成功导入 ${importedCount} 个项目`)
+  isBatchImportVisible.value = false
+  // 重置状态
+  batchImportFolder.value = ''
+  autoCreateGroup.value = false
+  bindToCreatedGroup.value = true
+  groupNameFromFolder.value = ''
+  foundProjects.value = []
+}
+
 const handleRemoveProject = async (id: string) => {
   await removeProject(id)
 }
@@ -226,6 +325,14 @@ const handleRemoveProject = async (id: string) => {
         >
           <Icon icon="mdi:refresh" :class="{ 'spin': projectState.isLoading }" />
           {{ projectState.isLoading ? '刷新中...' : '刷新全部' }}
+        </button>
+        <button
+          class="refresh-all-btn batch-import-btn"
+          @click="openBatchImportModal"
+          title="批量导入项目"
+        >
+          <Icon icon="mdi:folder-plus" />
+          批量导入
         </button>
       </div>
     </div>
@@ -298,6 +405,60 @@ const handleRemoveProject = async (id: string) => {
     <div v-if="isDragging" class="drop-overlay">
       <div class="drop-text">释放以添加项目</div>
     </div>
+
+    <!-- 批量导入弹窗 -->
+    <Modal
+      v-model:open="isBatchImportVisible"
+      title="批量导入项目"
+      :footer="null"
+      :width="500"
+    >
+      <div class="batch-import-form">
+        <div class="form-item">
+          <label>选择文件夹:</label>
+          <div class="folder-path">{{ batchImportFolder || '未选择' }}</div>
+        </div>
+
+        <div class="form-item">
+          <label>找到的项目 ({{ foundProjects.length }}):</label>
+          <div v-if="isScanning" class="scanning-tip">
+            <Icon icon="mdi:loading" class="spin" />
+            正在扫描...
+          </div>
+          <div v-else class="found-projects-list">
+            <div v-for="project in foundProjects" :key="project" class="found-project-item">
+              <Icon icon="mdi:folder" />
+              {{ project.split(/[/\\]/).pop() }}
+            </div>
+            <div v-if="foundProjects.length === 0" class="no-projects">
+              未找到可导入的项目
+            </div>
+          </div>
+        </div>
+
+        <div class="form-item">
+          <label>自动创建分组:</label>
+          <Switch v-model:checked="autoCreateGroup" />
+        </div>
+
+        <div v-if="autoCreateGroup" class="form-item">
+          <label>分组名称:</label>
+          <Input v-model:value="groupNameFromFolder" placeholder="请输入分组名称" />
+        </div>
+
+        <div v-if="autoCreateGroup" class="form-item">
+          <label>绑定到该分组:</label>
+          <Switch v-model:checked="bindToCreatedGroup" />
+        </div>
+
+        <div class="form-actions">
+          <button class="cancel-btn" @click="isBatchImportVisible = false">取消</button>
+          <button class="save-btn" @click="executeBatchImport" :disabled="foundProjects.length === 0">
+            导入 {{ foundProjects.length }} 个项目
+          </button>
+        </div>
+      </div>
+    </Modal>
 
     <!-- 新建/编辑分组弹窗 -->
     <Modal
@@ -668,6 +829,67 @@ const handleRemoveProject = async (id: string) => {
   font-size: 24px;
   color: var(--primary-color);
   font-weight: 500;
+}
+
+/* 批量导入按钮 */
+.batch-import-btn {
+  background: var(--primary-color) !important;
+}
+
+.batch-import-btn:hover {
+  background: var(--primary-hover) !important;
+}
+
+/* 批量导入表单 */
+.batch-import-form {
+  padding: 8px 0;
+}
+
+.folder-path {
+  padding: 8px 12px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.scanning-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  color: var(--text-secondary);
+}
+
+.found-projects-list {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-card);
+}
+
+.found-project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.found-project-item:last-child {
+  border-bottom: none;
+}
+
+.no-projects {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 /* 分组表单 */

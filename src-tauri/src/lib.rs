@@ -13,21 +13,32 @@ use zip::ZipWriter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+// 移除 ANSI 转义序列
+fn strip_ansi_codes(s: &str) -> String {
+    // ANSI 转义序列的正则表达式
+    let re = regex::Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]").unwrap();
+    re.replace_all(s, "").to_string()
+}
+
 #[cfg(windows)]
 fn convert_output(bytes: &[u8]) -> String {
     // Try GBK to UTF-8 conversion for Chinese Windows
     let (decoded, _, had_errors) = encoding_rs::GBK.decode(bytes);
-    if had_errors {
+    let result = if had_errors {
         // Fallback to lossy UTF-8
         String::from_utf8_lossy(bytes).to_string()
     } else {
         decoded.to_string()
-    }
+    };
+    // 移除 ANSI 转义序列
+    strip_ansi_codes(&result)
 }
 
 #[cfg(not(windows))]
 fn convert_output(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).to_string()
+    let result = String::from_utf8_lossy(bytes).to_string();
+    // 移除 ANSI 转义序列
+    strip_ansi_codes(&result)
 }
 
 struct AppState {
@@ -52,6 +63,7 @@ struct Project {
     version_name: Option<String>,
     group_id: Option<String>,
     last_updated_at: Option<i64>,
+    remark: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -94,46 +106,214 @@ struct ScriptOutput {
     is_error: bool,
 }
 
-#[tauri::command]
-fn open_in_vscode(path: String) -> Result<(), String> {
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'code' -ArgumentList '{}'", path)])
-        .spawn();
+// 尝试查找 IDE 的完整路径 - 简化版本
+fn find_ide_path(ide: &str) -> Option<String> {
+    // 根据IDE类型获取搜索配置
+    let (exe_names, base_paths): (Vec<&str>, Vec<&str>) = match ide {
+        "vscode" => (
+            vec!["code.exe"],
+            vec![
+                r"%LOCALAPPDATA%\Programs\Microsoft VS Code\bin",
+                r"%PROGRAMFILES%\Microsoft VS Code\bin",
+                r"%PROGRAMFILES(X86)%\Microsoft VS Code\bin",
+            ],
+        ),
+        "cursor" => (
+            vec!["Cursor.exe"],
+            vec![
+                r"%LOCALAPPDATA%\Programs\Cursor",
+                r"%APPDATA%\Cursor",
+            ],
+        ),
+        "webstorm" => (
+            vec!["webstorm64.exe"],
+            vec![
+                r"%PROGRAMFILES%\JetBrains\WebStorm\bin",
+                r"%PROGRAMFILES(X86)%\JetBrains\WebStorm\bin",
+            ],
+        ),
+        "trae" => (
+            vec!["Trae.exe", "Trae CN.exe"],
+            vec![
+                r"%LOCALAPPDATA%\Programs\Trae CN",
+                r"%LOCALAPPDATA%\Programs\Trae",
+            ],
+        ),
+        _ => return None,
+    };
 
-    Ok(())
+    // 1. 先在PATH中查找
+    for exe_name in &exe_names {
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Get-Command '{}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source", exe_name)])
+            .creation_flags(0x08000000)
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+
+    // 2. 展开环境变量并构建搜索路径
+    let mut all_paths: Vec<String> = Vec::new();
+
+    // 添加基本路径
+    for p in &base_paths {
+        let expanded = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("[Environment]::ExpandEnvironmentVariables('{}')", p)])
+            .creation_flags(0x08000000)
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&expanded.stdout).trim().to_string();
+        if !path.is_empty() {
+            all_paths.push(path);
+        }
+    }
+
+    // 添加用户目录路径
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        let user_paths = vec![
+            format!(r"{}\AppData\Local\Programs\Microsoft VS Code\bin", userprofile),
+            format!(r"{}\AppData\Local\Programs\Cursor", userprofile),
+            format!(r"{}\AppData\Local\Programs\Trae CN", userprofile),
+            format!(r"{}\AppData\Local\Programs\Trae", userprofile),
+            format!(r"{}\AppData\Roaming\Cursor", userprofile),
+        ];
+        all_paths.extend(user_paths);
+    }
+
+    // 3. 在所有路径中搜索exe
+    for search_path in &all_paths {
+        for exe_name in &exe_names {
+            let find_cmd = format!(
+                "if (Test-Path '{}') {{ Get-ChildItem -Path '{}' -Filter '{}' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }}",
+                search_path, search_path, exe_name
+            );
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &find_cmd])
+                .creation_flags(0x08000000)
+                .output()
+                .ok()?;
+            let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !found.is_empty() {
+                return Some(found);
+            }
+        }
+    }
+
+    None
 }
 
 #[tauri::command]
-fn open_in_cursor(path: String) -> Result<(), String> {
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'cursor' -ArgumentList '{}'", path)])
+fn open_in_vscode(path: String, ide_path: Option<String>) -> Result<(), String> {
+    // 使用传入的路径或查找 VSCode 路径
+    let exe_path = ide_path.or_else(|| find_ide_path("vscode")).unwrap_or_else(|| "code".to_string());
+
+    // 使用 PowerShell Start-Process 隐藏窗口启动
+    let result = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}'", exe_path, &path, &path)])
+        .creation_flags(0x08000000)
         .spawn();
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("启动失败: {}", e)),
+    }
 }
 
 #[tauri::command]
-fn open_in_webstorm(path: String) -> Result<(), String> {
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'webstorm' -ArgumentList '{}'", path)])
+fn open_in_cursor(path: String, ide_path: Option<String>) -> Result<(), String> {
+    // 使用传入的路径或查找 Cursor 路径
+    let exe_path = ide_path.or_else(|| find_ide_path("cursor")).unwrap_or_else(|| "cursor".to_string());
+
+    // 使用 PowerShell Start-Process 隐藏窗口启动
+    let result = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}'", exe_path, &path, &path)])
+        .creation_flags(0x08000000)
         .spawn();
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("启动失败: {}", e)),
+    }
 }
 
 #[tauri::command]
-fn open_in_trae(path: String) -> Result<(), String> {
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("Start-Process -FilePath 'trae' -ArgumentList '{}'", path)])
+fn open_in_webstorm(path: String, ide_path: Option<String>) -> Result<(), String> {
+    // 使用传入的路径或查找 WebStorm 路径
+    let exe_path = ide_path.or_else(|| find_ide_path("webstorm")).unwrap_or_else(|| "webstorm".to_string());
+
+    // 使用 PowerShell Start-Process 隐藏窗口启动
+    let result = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}'", exe_path, &path, &path)])
+        .creation_flags(0x08000000)
         .spawn();
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("启动失败: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn open_in_trae(path: String, ide_path: Option<String>) -> Result<(), String> {
+    // 使用传入的路径或查找 Trae 路径
+    let exe_path = ide_path.or_else(|| find_ide_path("trae")).unwrap_or_else(|| "Trae".to_string());
+
+    // 使用 PowerShell Start-Process 隐藏窗口启动
+    let result = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}'", exe_path, &path, &path)])
+        .creation_flags(0x08000000)
+        .spawn();
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("启动失败: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn open_in_wechat(path: String, ide_path: Option<String>) -> Result<(), String> {
+    // 使用传入的路径或默认路径
+    let exe_path = ide_path.unwrap_or_else(|| "wechat-devtools".to_string());
+
+    // 微信开发者工具使用 --project 参数打开项目
+    let result = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}'", exe_path, &path, &path)])
+        .creation_flags(0x08000000)
+        .spawn();
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("启动失败: {}", e)),
+    }
+}
+
+// 检查 IDE 是否可用
+#[tauri::command]
+fn check_ide_available(ide: String) -> Result<serde_json::Value, String> {
+    // 使用 find_ide_path 来查找 IDE
+    let ide_path = find_ide_path(&ide);
+
+    if let Some(path) = ide_path {
+        return Ok(serde_json::json!({
+            "available": true,
+            "path": path
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "available": false,
+        "path": null
+    }))
 }
 
 // 内部函数：获取当前分支名
 fn get_current_branch(path: &str) -> Result<String, String> {
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("cd '{}'; git branch --show-current", path)])
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("cd '{}'; git branch --show-current", path)])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -148,7 +328,8 @@ fn get_current_branch(path: &str) -> Result<String, String> {
 #[tauri::command]
 fn get_git_branches(path: String) -> Result<Vec<GitBranch>, String> {
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("cd '{}'; git branch -a", path)])
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("cd '{}'; git branch -a", path)])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -173,7 +354,7 @@ fn get_git_branches(path: String) -> Result<Vec<GitBranch>, String> {
 #[tauri::command]
 fn switch_git_branch(path: String, branch: String) -> Result<(), String> {
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("cd '{}'; git checkout {}", path, branch)])
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &format!("cd '{}'; git checkout {}", path, branch)])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -183,6 +364,31 @@ fn switch_git_branch(path: String, branch: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn scan_subfolders(path: String) -> Result<Vec<String>, String> {
+    let mut projects = Vec::new();
+
+    let entries = std::fs::read_dir(&path)
+        .map_err(|e| e.to_string())?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
+
+        if entry_path.is_dir() {
+            // 检查是否是项目目录（包含 package.json 或 .git）
+            let has_package_json = entry_path.join("package.json").exists();
+            let has_git = entry_path.join(".git").exists();
+
+            if has_package_json || has_git {
+                projects.push(entry_path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    Ok(projects)
 }
 
 #[tauri::command]
@@ -333,14 +539,16 @@ fn kill_script(state: tauri::State<AppState>, project_id: String) -> Result<(), 
 fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let output = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
+        // 使用 cmd /c start 隐藏窗口执行 taskkill
+        let output = Command::new("cmd")
+            .args(["/c", "start", "", "taskkill", "/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x08000000)
+            .spawn()
             .map_err(|e| e.to_string())?;
 
-        if !output.status.success() {
-            return Err("Failed to kill process".to_string());
-        }
+        // 不等待结果，因为 start 命令会立即返回
+        let _ = output;
+        return Ok(());
     }
 
     Ok(())
@@ -359,6 +567,19 @@ fn update_project_config(state: tauri::State<AppState>, id: String, product_name
     conn.execute(
         "UPDATE projects SET product_name_template = ?1, add_timestamp = ?2, add_branch = ?3, add_env = ?4, env_name = ?5, add_version = ?6, version_name = ?7 WHERE id = ?8",
         (&product_name_template, &add_timestamp, &add_branch, &add_env, &env_name, &add_version, &version_name, &id),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// 更新项目备注
+#[tauri::command]
+fn update_project_remark(state: tauri::State<AppState>, id: String, remark: Option<String>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "UPDATE projects SET remark = ?1 WHERE id = ?2",
+        (&remark, &id),
     ).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -519,11 +740,55 @@ fn save_config(state: tauri::State<AppState>, dist_output_path: String, auto_ref
     Ok(())
 }
 
+// IDE 配置结构体
+#[derive(Serialize, Deserialize, Clone)]
+struct IdeConfig {
+    id: String,
+    name: String,
+    path: String,
+    enabled: bool,
+}
+
+// 获取所有 IDE 配置
+#[tauri::command]
+fn get_ide_configs(state: tauri::State<AppState>) -> Result<Vec<IdeConfig>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare("SELECT id, name, path, enabled FROM ide_config")
+        .map_err(|e| e.to_string())?;
+
+    let configs = stmt.query_map([], |row| {
+        Ok(IdeConfig {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            path: row.get(2)?,
+            enabled: row.get::<_, i32>(3)? != 0,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    Ok(configs)
+}
+
+// 保存 IDE 配置
+#[tauri::command]
+fn save_ide_config(state: tauri::State<AppState>, id: String, name: String, path: String, enabled: bool) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO ide_config (id, name, path, enabled) VALUES (?1, ?2, ?3, ?4)",
+        (&id, &name, &path, if enabled { 1 } else { 0 }),
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[tauri::command]
 fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at, remark FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let projects = stmt.query_map([], |row| {
@@ -543,6 +808,7 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
             version_name: row.get(12)?,
             group_id: row.get(13)?,
             last_updated_at: row.get(14)?,
+            remark: row.get(15)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -552,14 +818,14 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, String> {
 }
 
 #[tauri::command]
-fn add_project(state: tauri::State<AppState>, id: String, name: String, path: String, logo: Option<String>) -> Result<(), String> {
+fn add_project(state: tauri::State<AppState>, id: String, name: String, path: String, logo: Option<String>, group_id: Option<String>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let added_at = chrono::Utc::now().timestamp();
     let is_git_repo = check_is_git_repo(path.clone());
 
     conn.execute(
-        "INSERT INTO projects (id, name, path, logo, added_at, is_git_repo, last_updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        (&id, &name, &path, &logo, &added_at, &is_git_repo, &added_at),
+        "INSERT INTO projects (id, name, path, logo, added_at, is_git_repo, last_updated_at, group_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (&id, &name, &path, &logo, &added_at, &is_git_repo, &added_at, &group_id),
     ).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -585,7 +851,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // 获取所有项目
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at, remark FROM projects")
         .map_err(|e| e.to_string())?;
 
     let projects: Vec<Project> = stmt.query_map([], |row| {
@@ -605,6 +871,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             version_name: row.get(12)?,
             group_id: row.get(13)?,
             last_updated_at: row.get(14)?,
+            remark: row.get(15)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -623,7 +890,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
     }
 
     // 重新查询获取更新后的数据
-    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at FROM projects ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT id, name, path, logo, added_at, is_git_repo, product_name_template, add_timestamp, add_branch, add_env, env_name, add_version, version_name, group_id, last_updated_at, remark FROM projects ORDER BY added_at DESC")
         .map_err(|e| e.to_string())?;
 
     let updated_projects: Vec<Project> = stmt.query_map([], |row| {
@@ -643,6 +910,7 @@ fn refresh_all_projects(state: tauri::State<AppState>) -> Result<Vec<Project>, S
             version_name: row.get(12)?,
             group_id: row.get(13)?,
             last_updated_at: row.get(14)?,
+            remark: row.get(15)?,
         })
     }).map_err(|e| e.to_string())?
     .filter_map(|r| r.ok())
@@ -820,6 +1088,12 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
         [],
     );
 
+    // 检查并添加 remark 列（如果不存在）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN remark TEXT",
+        [],
+    );
+
     // 创建配置表（如果已存在则忽略）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS app_config (
@@ -845,6 +1119,17 @@ fn init_db(app_dir: &std::path::Path) -> Result<Connection, rusqlite::Error> {
             color TEXT NOT NULL,
             icon TEXT,
             created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // 创建 IDE 配置表（如果已存在则忽略）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ide_config (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1
         )",
         [],
     )?;
@@ -882,6 +1167,11 @@ pub fn run() {
             open_in_cursor,
             open_in_webstorm,
             open_in_trae,
+            open_in_wechat,
+            scan_subfolders,
+            check_ide_available,
+            get_ide_configs,
+            save_ide_config,
             get_projects,
             add_project,
             remove_project,
@@ -894,6 +1184,7 @@ pub fn run() {
             kill_script,
             check_is_git_repo,
             update_project_config,
+            update_project_remark,
             copy_dist_and_zip,
             get_config,
             save_config,

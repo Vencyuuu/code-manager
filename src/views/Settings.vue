@@ -1,17 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Input, Switch, Modal, message } from 'ant-design-vue'
 import { Icon } from '@iconify/vue'
 import { useTheme } from '../stores/themeStore'
+import { useErrorLogStore } from '../stores/errorLogStore'
+import { useIdeConfigStore, type IdeConfig } from '../stores/ideConfigStore'
 
 const { themeConfig, setPrimaryColor, setDarkMode } = useTheme()
+const { errorLogs, refreshErrorLogs, clearErrorLogs } = useErrorLogStore()
+const { ideConfigs } = useIdeConfigStore()
 
 // 配置项
 const distOutputPath = ref('')
 const autoRefreshEnabled = ref(false)
 const autoRefreshInterval = ref(60)
+
+// IDE 配置列表
+const availableIdes = [
+  { id: 'vscode', name: 'VSCode', icon: 'mdi:microsoft-visual-studio' },
+  { id: 'cursor', name: 'Cursor', icon: 'mdi:cursor-default' },
+  { id: 'webstorm', name: 'WebStorm', icon: 'mdi:jetbrains' },
+  { id: 'trae', name: 'Trae', icon: 'mdi:robot' },
+  { id: 'wechat', name: '微信开发者工具', icon: 'mdi:wechat' }
+]
 
 // 主题色
 const primaryColor = ref('#1890ff')
@@ -25,12 +38,12 @@ const features = [
   {
     title: '项目列表',
     icon: 'mdi:folder-multiple',
-    description: '展示所有已添加的项目，支持拖拽添加新项目，可搜索项目名称。',
+    description: '展示所有已添加的项目，支持拖拽添加新项目，可搜索项目名称。拖拽添加时自动绑定到当前选中的分组。',
   },
   {
     title: 'IDE 打开',
     icon: 'mdi:microsoft-visual-studio',
-    description: '支持多种 IDE 打开项目：VSCode、Cursor、WebStorm、Trae。',
+    description: '支持多种 IDE 打开项目：VSCode、Cursor、WebStorm、Trae、微信开发者工具。仅显示已配置的 IDE。',
   },
   {
     title: 'Git 分支管理',
@@ -45,7 +58,7 @@ const features = [
   {
     title: '自定义脚本',
     icon: 'mdi:console',
-    description: '可输入自定义命令执行，如 npm install、yarn add 等。',
+    description: '可输入自定义命令执行，如 npm install、yarn add 等。所有命令后台执行，不弹出终端窗口。',
   },
   {
     title: '产物打包',
@@ -55,7 +68,17 @@ const features = [
   {
     title: '项目分组',
     icon: 'mdi:folder-group',
-    description: '支持创建分组并绑定项目，方便按分类管理项目。',
+    description: '支持创建分组并绑定项目，方便按分类管理项目。可批量选择项目并绑定到指定分组。',
+  },
+  {
+    title: '项目备注',
+    icon: 'mdi:note-text',
+    description: '可为每个项目添加备注信息，方便记录项目相关说明。',
+  },
+  {
+    title: '错误日志',
+    icon: 'mdi:alert-circle',
+    description: '自动记录应用运行中的错误信息，便于问题排查。保留最近 24 小时的错误日志。',
   },
   {
     title: '自动刷新',
@@ -67,19 +90,32 @@ const features = [
     icon: 'mdi:palette',
     description: '支持自定义主题颜色和夜间模式，提供多种预设颜色。',
   },
-  {
-    title: '多 IDE 支持',
-    icon: 'mdi:application-cog',
-    description: '支持配置不同的 IDE 打开方式，满足不同开发习惯。',
-  },
 ]
 
 // 版本更新数据
 const versionHistory = [
   {
+    version: '1.0.1',
+    date: '2026-03-17',
+    isLatest: true,
+    features: [
+      'IDE 配置优化 - 手动配置 IDE 路径，仅显示已配置的 IDE',
+      '新增微信开发者工具支持',
+      '项目备注功能 - 可为项目添加备注信息',
+      '批量导入优化 - 自动创建分组时可选择是否绑定到该分组',
+      '拖拽添加项目自动绑定到当前选中的分组',
+      '终端窗口完全隐藏 - 所有操作后台执行不再弹出终端',
+      '启动优化 - 首次启动不再自动刷新所有项目',
+      '左侧菜单优化 - 添加图标，渐变效果优化',
+      '错误日志模块 - 存储和查看应用错误日志',
+      '即时保存 - 设置和项目配置修改即时生效',
+      '修复分组问题 - 拖拽添加项目时正确绑定到选中的分组',
+    ],
+  },
+  {
     version: '1.0.0',
     date: '2026-03-16',
-    isLatest: true,
+    isLatest: false,
     features: [
       '项目列表 - 支持拖拽添加项目、搜索筛选',
       '多 IDE 支持 - VSCode、Cursor、WebStorm、Trae',
@@ -119,26 +155,54 @@ const presetColors = [
   '#eb2f96', // 粉色
 ]
 
-// 原始配置数据（用于比较是否有变更）
-const originalConfig = ref({
-  distOutputPath: '',
-  autoRefreshEnabled: false,
-  autoRefreshInterval: 60,
-  primaryColor: '#1890ff',
-  isDarkMode: false
-})
+// 错误日志相关
+const isErrorLogModalVisible = ref(false)
 
-// 判断配置是否有变更
-const hasChanges = computed(() => {
-  return distOutputPath.value !== originalConfig.value.distOutputPath ||
-    autoRefreshEnabled.value !== originalConfig.value.autoRefreshEnabled ||
-    autoRefreshInterval.value !== originalConfig.value.autoRefreshInterval ||
-    primaryColor.value !== originalConfig.value.primaryColor ||
-    isDarkMode.value !== originalConfig.value.isDarkMode
-})
+const openErrorLogModal = () => {
+  refreshErrorLogs()
+  isErrorLogModalVisible.value = true
+}
+
+const handleClearErrorLogs = () => {
+  clearErrorLogs()
+  refreshErrorLogs()
+  message.success('错误日志已清除')
+}
+
+const formatErrorTime = (timestamp: number) => {
+  const date = new Date(timestamp)
+  const now = new Date()
+  const diff = now.getTime() - date.getTime()
+  const minutes = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes}分钟前`
+  if (hours < 24) return `${hours}小时前`
+  return date.toLocaleString('zh-CN')
+}
 
 // 定时器
 let refreshTimer: number | null = null
+
+// 保存配置（自动保存）
+const saveConfig = async () => {
+  try {
+    await invoke('save_config', {
+      distOutputPath: distOutputPath.value,
+      autoRefreshEnabled: autoRefreshEnabled.value,
+      autoRefreshInterval: String(autoRefreshInterval.value)
+    })
+    // 保存主题配置
+    setPrimaryColor(primaryColor.value)
+    setDarkMode(isDarkMode.value)
+    // 更新定时器
+    setupAutoRefresh()
+  } catch (err) {
+    console.error('Failed to save config:', err)
+    message.error('保存失败: ' + err)
+  }
+}
 
 // 加载配置
 const loadConfig = async () => {
@@ -150,46 +214,70 @@ const loadConfig = async () => {
     // 加载主题配置
     primaryColor.value = themeConfig.primaryColor
     isDarkMode.value = themeConfig.isDarkMode
-    // 保存原始配置
-    originalConfig.value = {
-      distOutputPath: distOutputPath.value,
-      autoRefreshEnabled: autoRefreshEnabled.value,
-      autoRefreshInterval: autoRefreshInterval.value,
-      primaryColor: primaryColor.value,
-      isDarkMode: isDarkMode.value
-    }
   } catch (err) {
     console.error('Failed to load config:', err)
   }
 }
 
-// 保存配置
-const saveConfig = async () => {
+// 加载 IDE 配置
+const loadIdeConfigs = async () => {
   try {
-    await invoke('save_config', {
-      distOutputPath: distOutputPath.value,
-      autoRefreshEnabled: autoRefreshEnabled.value,
-      autoRefreshInterval: String(autoRefreshInterval.value)
-    })
-    // 保存主题配置
-    setPrimaryColor(primaryColor.value)
-    setDarkMode(isDarkMode.value)
-    message.success('配置已保存')
-    // 更新原始配置
-    originalConfig.value = {
-      distOutputPath: distOutputPath.value,
-      autoRefreshEnabled: autoRefreshEnabled.value,
-      autoRefreshInterval: autoRefreshInterval.value,
-      primaryColor: primaryColor.value,
-      isDarkMode: isDarkMode.value
-    }
-    // 更新定时器
-    setupAutoRefresh()
+    const configs = await invoke<IdeConfig[]>('get_ide_configs')
+    ideConfigs.value = configs
   } catch (err) {
-    console.error('Failed to save config:', err)
+    console.error('Failed to load IDE configs:', err)
+  }
+}
+
+// 保存单个 IDE 配置
+const saveIdeConfig = async (ide: typeof availableIdes[0], path: string, enabled: boolean) => {
+  try {
+    await invoke('save_ide_config', {
+      id: ide.id,
+      name: ide.name,
+      path: path,
+      enabled: enabled
+    })
+    // 更新本地状态
+    const existing = ideConfigs.value.find(c => c.id === ide.id)
+    if (existing) {
+      existing.path = path
+      existing.enabled = enabled
+    } else {
+      ideConfigs.value.push({
+        id: ide.id,
+        name: ide.name,
+        path: path,
+        enabled: enabled
+      })
+    }
+  } catch (err) {
+    console.error('Failed to save IDE config:', err)
     message.error('保存失败: ' + err)
   }
 }
+
+// 选择 IDE 路径
+const selectIdePath = async (ide: typeof availableIdes[0]) => {
+  try {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title: `选择 ${ide.name} 可执行文件`
+    })
+    if (selected) {
+      await saveIdeConfig(ide, selected as string, true)
+      message.success(`${ide.name} 路径已配置`)
+    }
+  } catch (err) {
+    console.error('Failed to select IDE path:', err)
+  }
+}
+
+// 监听配置变化，自动保存
+watch([distOutputPath, autoRefreshEnabled, autoRefreshInterval, primaryColor, isDarkMode], () => {
+  saveConfig()
+}, { deep: true })
 
 // 选择目录
 const selectOutputPath = async () => {
@@ -218,9 +306,8 @@ const setupAutoRefresh = () => {
     const intervalMs = autoRefreshInterval.value * 60 * 1000
     refreshTimer = window.setInterval(async () => {
       try {
+        // 仅刷新项目元数据，不触发项目卡片的重新加载
         await invoke('refresh_all_projects')
-        // 触发自定义事件通知项目列表刷新
-        window.dispatchEvent(new CustomEvent('projects-auto-refresh'))
       } catch (err) {
         console.error('Auto refresh failed:', err)
       }
@@ -240,6 +327,7 @@ const toggleDarkMode = (checked: boolean | string | number) => {
 
 onMounted(async () => {
   await loadConfig()
+  await loadIdeConfigs()
   setupAutoRefresh()
 })
 
@@ -258,6 +346,10 @@ onUnmounted(() => {
         设置
       </h2>
       <div class="header-actions">
+        <button class="feature-btn" @click="openErrorLogModal">
+          <Icon icon="mdi:alert-circle" />
+          错误日志
+        </button>
         <button class="feature-btn" @click="openVersionModal">
           <Icon icon="mdi:history" />
           版本更新
@@ -330,6 +422,31 @@ onUnmounted(() => {
     </div>
 
     <div class="settings-section">
+      <h3>IDE 配置</h3>
+      <p class="setting-hint">配置 IDE 可执行文件路径后，项目卡片中才会显示对应的打开方式</p>
+      <div class="ide-config-list">
+        <div v-for="ide in availableIdes" :key="ide.id" class="ide-config-item">
+          <div class="ide-config-left">
+            <Icon :icon="ide.icon" class="ide-icon" :class="ide.id" />
+            <span class="ide-name">{{ ide.name }}</span>
+          </div>
+          <div class="ide-config-right">
+            <Input
+              :value="ideConfigs.find(c => c.id === ide.id)?.path || ''"
+              :placeholder="`选择 ${ide.name} 可执行文件`"
+              class="ide-path-input"
+              readonly
+            />
+            <button class="browse-btn" @click="selectIdePath(ide)">
+              <Icon icon="mdi:folder-open" />
+              浏览
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>关于</h3>
       <div class="about-info">
         <div class="about-logo">
@@ -337,17 +454,10 @@ onUnmounted(() => {
         </div>
         <div class="about-content">
           <h4>代码管理器</h4>
-          <p class="version">版本 1.0.0</p>
+          <p class="version">版本 1.0.1</p>
           <p class="description">一款专为开发者设计的项目管理工具，支持多 IDE 打开、Git 分支管理、NPM 脚本运行等功能。</p>
         </div>
       </div>
-    </div>
-
-    <div class="settings-actions">
-      <button class="save-btn" @click="saveConfig" :disabled="!hasChanges">
-        <Icon icon="mdi:content-save" />
-        保存配置
-      </button>
     </div>
 
     <!-- 功能介绍弹窗 -->
@@ -388,6 +498,37 @@ onUnmounted(() => {
           <ul class="version-features">
             <li v-for="(feature, index) in item.features" :key="index">{{ feature }}</li>
           </ul>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 错误日志弹窗 -->
+    <Modal
+      v-model:open="isErrorLogModalVisible"
+      title="错误日志"
+      :footer="null"
+      :width="700"
+      class="error-log-modal"
+    >
+      <div class="error-log-content">
+        <div class="error-log-actions" v-if="errorLogs.length > 0">
+          <button class="clear-logs-btn" @click="handleClearErrorLogs">
+            <Icon icon="mdi:delete-sweep" />
+            清除所有日志
+          </button>
+        </div>
+        <div v-if="errorLogs.length === 0" class="no-error-logs">
+          <Icon icon="mdi:check-circle" class="no-error-icon" />
+          <span>暂无错误日志</span>
+        </div>
+        <div v-else class="error-log-list">
+          <div v-for="log in errorLogs" :key="log.id" class="error-log-item">
+            <div class="error-log-header">
+              <span class="error-log-source">{{ log.source }}</span>
+              <span class="error-log-time">{{ formatErrorTime(log.timestamp) }}</span>
+            </div>
+            <div class="error-log-message">{{ log.message }}</div>
+          </div>
         </div>
       </div>
     </Modal>
@@ -506,31 +647,71 @@ onUnmounted(() => {
   margin-top: 8px;
 }
 
-.settings-actions {
+/* IDE 配置样式 */
+.ide-config-list {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
 }
 
-.save-btn {
+.ide-config-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 24px;
-  background: var(--primary-color);
-  color: #fff;
-  border: none;
-  border-radius: 4px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  background: var(--bg-color);
+  border-radius: 6px;
+}
+
+.ide-config-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 120px;
+}
+
+.ide-icon {
+  font-size: 24px;
+}
+
+.ide-icon.vscode {
+  color: #007acc;
+}
+
+.ide-icon.cursor {
+  color: #3b82f6;
+}
+
+.ide-icon.webstorm {
+  color: #087cfa;
+}
+
+.ide-icon.trae {
+  color: #ff6b35;
+}
+
+.ide-icon.wechat {
+  color: #07c160;
+}
+
+.ide-name {
   font-size: 14px;
-  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-primary);
 }
 
-.save-btn:hover:not(:disabled) {
-  background: var(--primary-hover);
+.ide-config-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  max-width: 400px;
 }
 
-.save-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.ide-path-input {
+  flex: 1;
 }
 
 /* 关于卡片 */
@@ -729,5 +910,88 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--text-primary);
   line-height: 1.8;
+}
+
+/* 错误日志样式 */
+.error-log-content {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.error-log-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.clear-logs-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #ff4d4f;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.clear-logs-btn:hover {
+  background: #ff7875;
+}
+
+.no-error-logs {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+  color: var(--text-secondary);
+}
+
+.no-error-icon {
+  font-size: 48px;
+  color: #52c41a;
+  margin-bottom: 12px;
+}
+
+.error-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.error-log-item {
+  padding: 12px;
+  background: var(--bg-color);
+  border-radius: 6px;
+  border-left: 3px solid #ff4d4f;
+}
+
+.error-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.error-log-source {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.error-log-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.error-log-message {
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+  line-height: 1.5;
 }
 </style>
