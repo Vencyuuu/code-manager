@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "CodeManager",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.codesmgr.app",
   "build": {
     "frontendDist": "../dist",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "代码管理器 v1.0.1",
+        "title": "代码管理器 v1.0.2",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

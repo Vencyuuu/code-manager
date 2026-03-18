@@ -460,6 +460,8 @@ fn run_npm_script(app_handle: tauri::AppHandle, state: tauri::State<AppState>, p
 
         let _ = child.wait();
 
+        // 注意: running_processes 的清理由前端通过 cleanup_script_state 命令处理
+
         let _ = app_handle_clone.emit("script-output", ScriptOutput {
             project_id: project_id_clone,
             output: "__SCRIPT_COMPLETED__".to_string(),
@@ -533,6 +535,14 @@ fn kill_script(state: tauri::State<AppState>, project_id: String) -> Result<(), 
         kill_process(pid)?;
     }
 
+    Ok(())
+}
+
+// 仅清理脚本状态（不杀死进程），用于脚本正常完成后清理
+#[tauri::command]
+fn cleanup_script_state(state: tauri::State<AppState>, project_id: String) -> Result<(), String> {
+    let mut processes = state.running_processes.lock().map_err(|e| e.to_string())?;
+    processes.remove(&project_id);
     Ok(())
 }
 
@@ -1182,6 +1192,7 @@ pub fn run() {
             run_npm_script,
             run_custom_script,
             kill_script,
+            cleanup_script_state,
             check_is_git_repo,
             update_project_config,
             update_project_remark,

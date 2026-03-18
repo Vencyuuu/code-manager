@@ -95,9 +95,18 @@ const features = [
 // 版本更新数据
 const versionHistory = [
   {
-    version: '1.0.1',
+    version: '1.0.2',
     date: '2026-03-17',
     isLatest: true,
+    features: [
+      '内存泄漏修复 - 修复多处事件监听器未清理导致的内存泄漏',
+      '脚本状态清理 - 脚本执行完成后正确清理后端进程状态',
+    ],
+  },
+  {
+    version: '1.0.1',
+    date: '2026-03-17',
+    isLatest: false,
     features: [
       'IDE 配置优化 - 手动配置 IDE 路径，仅显示已配置的 IDE',
       '新增微信开发者工具支持',

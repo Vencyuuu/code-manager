@@ -108,6 +108,7 @@ const groupBackgroundStyle = computed(() => {
 })
 
 let unlistenOutput: UnlistenFn | null = null
+let unlistenScriptStarted: UnlistenFn | null = null
 
 // 加载项目数据
 const loadProjectData = async () => {
@@ -191,7 +192,7 @@ onMounted(async () => {
   }
 
   // 监听脚本开始事件
-  await listen<[string, string]>('script-started', (event) => {
+  unlistenScriptStarted = await listen<[string, string]>('script-started', (event) => {
     if (event.payload[0] === props.project.id) {
       addScriptState(props.project.id, event.payload[1])
     }
@@ -203,6 +204,8 @@ onMounted(async () => {
       if (event.payload.output === '__SCRIPT_COMPLETED__') {
         isRunningScript.value = false
         markScriptCompleted(props.project.id)
+        // 清理后端 running_processes 状态
+        invoke('cleanup_script_state', { projectId: props.project.id }).catch(console.error)
       } else {
         scriptOutput.value += event.payload.output + '\n'
         updateScriptOutput(props.project.id, event.payload.output)
@@ -263,6 +266,9 @@ watch(remark, async (newRemark) => {
 onUnmounted(() => {
   if (unlistenOutput) {
     unlistenOutput()
+  }
+  if (unlistenScriptStarted) {
+    unlistenScriptStarted()
   }
   window.removeEventListener('projects-auto-refresh', handleAutoRefresh)
 })

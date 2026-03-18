@@ -13,7 +13,7 @@ const { loadProjects } = useProjectStore()
 const { loadThemeConfig } = useTheme()
 const { ideConfigs } = useIdeConfigStore()
 
-const APP_VERSION = 'v1.0.1'
+const APP_VERSION = 'v1.0.2'
 
 // 首次进入引导
 const showGuide = ref(false)
@@ -148,14 +148,14 @@ onMounted(async () => {
     >
       <div class="guide-content">
         <div class="guide-icon">
-          <Icon :icon="guideSteps[guideStep].icon" />
+          <Icon :icon="guideSteps[guideStep]?.icon || 'mdi:information'" />
         </div>
-        <h3 class="guide-title">{{ guideSteps[guideStep].title }}</h3>
-        <p class="guide-text">{{ guideSteps[guideStep].content }}</p>
+        <h3 class="guide-title">{{ guideSteps[guideStep]?.title || '' }}</h3>
+        <p class="guide-text">{{ guideSteps[guideStep]?.content || '' }}</p>
 
         <div class="guide-steps">
           <span
-            v-for="(step, index) in guideSteps"
+            v-for="(_step, index) in guideSteps"
             :key="index"
             class="step-dot"
             :class="{ active: index === guideStep }"

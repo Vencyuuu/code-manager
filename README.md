@@ -2,7 +2,7 @@
 # 代码管理器 (Code Manager)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.0.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-green" alt="Platform">
   <img src="https://img.shields.io/badge/framework-Tauri 2.0-purple" alt="Framework">
 </p>
@@ -56,8 +56,8 @@
 
 ### Windows
 
-- [下载 MSI 安装包](./bundle/msi/CodeManager_1.0.1_x64_en-US.msi)
-- [下载 NSIS 安装包](./bundle/nsis/CodeManager_1.0.1_x64-setup.exe)
+- [下载 MSI 安装包](./bundle/msi/CodeManager_1.0.2_x64_en-US.msi)
+- [下载 NSIS 安装包](./bundle/nsis/CodeManager_1.0.2_x64-setup.exe)
 
 ### Linux
 
@@ -80,8 +80,8 @@ sudo pacman -S webkit2gtk-4.1 libappindicator librsvg2 patchelf
 #### 运行方式
 
 1. **下载 AppImage**（推荐）
-   - 下载后添加执行权限：`chmod +x CodeManager_1.0.1_x86_64.AppImage`
-   - 运行：`./CodeManager_1.0.1_x86_64.AppImage`
+   - 下载后添加执行权限：`chmod +x CodeManager_1.0.2_x86_64.AppImage`
+   - 运行：`./CodeManager_1.0.2_x86_64.AppImage`
 
 2. **或使用 AppImageLauncher**
    - 安装 AppImage 后会自动集成到系统应用菜单
@@ -143,35 +143,13 @@ code-manager/
 │   ├── src/                # Rust 源码
 │   └── capabilities/       # 权限配置
 ├── package.json            # 项目配置
-└── README.md               # 项目文档
+├── README.md               # 项目文档
+└── FEATURES.md            # 版本更新日志
 ```
 
 ## 版本更新
 
-### v1.0.1 (2026-03-17)
-
-- 左侧菜单栏添加图标
-- 左侧渐变改为从主题色向白色渐变
-- 批量导入弹窗增加"绑定到该分组"开关
-- 移除批量导入旁的"绑定到分组"按钮
-- 支持微信开发者工具 IDE 打开
-- 添加项目备注功能
-- 添加错误日志记录功能
-- 修复拖拽项目到分组时未正确绑定的问题
-- 初步支持 Linux 系统
-
-### v1.0.0 (2026-03-16)
-
-- 初始版本发布
-- 项目列表管理
-- 多 IDE 支持
-- Git 分支管理
-- NPM 脚本运行
-- 自定义脚本执行
-- 产物打包功能
-- 项目分组
-- 自动刷新
-- 主题定制与夜间模式
+详细版本更新内容请查看 [FEATURES.md](./FEATURES.md)
 
 ## License
 

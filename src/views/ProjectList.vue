@@ -37,6 +37,8 @@ const selectedProjectIds = ref<string[]>([])
 
 
 let unlisten: UnlistenFn | null = null
+let unlistenDragEnter: UnlistenFn | null = null
+let unlistenDragLeave: UnlistenFn | null = null
 
 // 过滤后的项目列表
 const filteredProjects = computed(() => {
@@ -186,11 +188,11 @@ onMounted(async () => {
     await handleDrop(event.payload.paths)
   })
 
-  await listen('tauri://drag-enter', () => {
+  unlistenDragEnter = await listen('tauri://drag-enter', () => {
     isDragging.value = true
   })
 
-  await listen('tauri://drag-leave', () => {
+  unlistenDragLeave = await listen('tauri://drag-leave', () => {
     isDragging.value = false
   })
 })
@@ -198,6 +200,12 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlisten) {
     unlisten()
+  }
+  if (unlistenDragEnter) {
+    unlistenDragEnter()
+  }
+  if (unlistenDragLeave) {
+    unlistenDragLeave()
   }
 })
 
